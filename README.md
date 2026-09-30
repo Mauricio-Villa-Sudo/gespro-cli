@@ -1,28 +1,43 @@
-# GesPro desde la terminal · Grupo 3
+# GesPro desde la terminal
 
-Script para registrar horas y actualizar tareas de GesPro sin abrir el navegador. Funciona con el
-proyecto `cinf100-202620-con-8528-grupo_3` de <https://gespro.devhub.cl>.
+Script para registrar horas y actualizar tareas de GesPro (<https://gespro.devhub.cl>) sin abrir el
+navegador. Sirve para cualquier proyecto de la carrera que use GesPro.
 
 Es un solo archivo, `gespro.py`, y usa solo la biblioteca estándar de Python 3.9 o superior. No hay
 que instalar nada.
 
-## 1. Tu token
+## 1. Configuración
+
+### Tu token
 
 Cada persona usa su propio token. GesPro registra las horas a nombre del dueño del token: con el
 token de otra persona, tus horas quedan a nombre suyo.
 
 1. Entra a <https://gespro.devhub.cl/my/access_tokens>.
 2. En la sección **API**, crea un token y cópialo.
-3. Copia `gespro.env.example` como `gespro.env` y pega el token después del `=`:
+3. Copia `gespro.env.example` como `gespro.env` y pega el token después de `GESPRO_API_KEY=`.
 
-   ```
-   GESPRO_API_KEY=tu_token
-   ```
+`gespro.env` está en `.gitignore`, así que no se sube si trabajas sobre una copia de este
+repositorio. No pegues el token en un chat ni en un commit. Si se filtra, bórralo en la misma página
+y crea otro.
 
-`gespro.env` está en `.gitignore`, así que no se sube al repositorio. No pegues el token en el chat
-del grupo ni en un commit. Si se filtra, bórralo en la misma página y crea otro.
+### Tu proyecto
 
-Otra opción es dejarlo en la variable de entorno `GESPRO_API_KEY`.
+```
+python gespro.py --proyectos
+```
+
+Muestra los proyectos que ve tu token. Copia el identificador del tuyo en `gespro.env`:
+
+```
+GESPRO_API_KEY=tu_token
+GESPRO_PROJECT=cinf100-202620-con-XXXX-grupo_N
+```
+
+Si tu token ve un solo proyecto, puedes dejar `GESPRO_PROJECT` vacío. Si participas en más de uno,
+usa `--proyecto identificador` para cambiar de proyecto en una llamada.
+
+Las dos líneas también se pueden dar como variables de entorno con el mismo nombre.
 
 ## 2. Comandos
 
@@ -57,12 +72,11 @@ python gespro.py --wp 620 --sprint "Sprint 2"
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
-- Sin `--fecha`, las horas quedan con la fecha de hoy.
+- Sin `--fecha`, las horas quedan con la fecha de hoy. No acepta fechas futuras.
 - `--comment` queda como comentario en la tarea y también acompaña a las horas.
 - Agrega `--dry-run` para ver lo que haría sin escribir nada. Úsalo la primera vez.
 
-Estados válidos: `New`, `In progress`, `In Review`, `Blocked`, `Done` y los demás que muestra GesPro.
-Sprints: `Sprint 1`, `Sprint 2`, `Sprint 3`, `Sprint 4` y `Product Backlog`.
+Si escribes mal un estado o un sprint, el error muestra los nombres válidos de tu proyecto.
 
 ### Ver al equipo
 
@@ -70,29 +84,29 @@ Sprints: `Sprint 1`, `Sprint 2`, `Sprint 3`, `Sprint 4` y `Product Backlog`.
 python gespro.py --report
 ```
 
-Lista las tareas de cada persona con su estado y el total de horas. No escribe nada.
+Lista las tareas de cada persona del proyecto con su estado y el total de horas. No escribe nada.
 
-## 3. Reglas del grupo
+## 3. Buenas prácticas
 
-- Registra las horas que trabajaste de verdad, el día que las trabajaste. La evaluación es
-  individual y GesPro es la evidencia.
-- Al tomar una tarea, pásala a `In progress`, súbele el porcentaje y deja un comentario con lo que
-  vas a hacer. Al terminarla, otro comentario con lo que quedó hecho y el enlace al PR.
-- Marca `Done` solo lo que ya está integrado en `desa`.
-- Si una tarea no es tuya, no le registres horas. El script igual te deja, porque a veces hay que
-  corregir algo, pero te muestra a quién está asignada.
+- Registra las horas que trabajaste de verdad, el día que las trabajaste. GesPro es la evidencia de
+  tu trabajo individual.
+- Al tomar una tarea, pásala a `In progress` y deja un comentario con lo que vas a hacer. Al
+  terminarla, deja otro con lo que quedó hecho y el enlace al PR o al commit.
+- No registres horas en tareas de otra persona. El script te deja, porque a veces hay que corregir
+  algo, pero te muestra a quién está asignada.
 
 ## 4. Si algo falla
 
 | Mensaje | Qué pasa | Qué hacer |
 |---|---|---|
 | `Falta tu token` | No encuentra `gespro.env` ni la variable | Revisa que `gespro.env` esté en la misma carpeta que `gespro.py` |
+| `Tu token ve N proyectos` | No sabe cuál es el tuyo | Completa `GESPRO_PROJECT` o usa `--proyecto` |
+| `Tu token no ve el proyecto` | El identificador está mal o no eres miembro | Cópialo tal cual desde `--proyectos` |
 | `HTTP 401` | El token no sirve | Crea uno nuevo en la página de tokens |
 | `HTTP 403` con `1010` | Cloudflare bloqueó la petición | No cambies el `USER_AGENT` del script |
-| `HTTP 403` | Tu usuario no tiene permiso para eso | Pídeselo a quien administra el proyecto en GesPro |
+| `HTTP 403` | Tu usuario no tiene permiso para eso | Pídeselo a quien administra tu proyecto |
 | `HTTP 409` | Alguien cambió la tarea mientras tanto | Vuelve a ejecutar el comando |
-| `No existe el estado` o `el sprint` | El nombre no coincide | El error lista los nombres válidos |
-| `no es del proyecto del grupo` | El número no es de nuestro proyecto | Revisa el número en GesPro |
+| `no es de tu proyecto` | El número de tarea es de otro proyecto | Revisa el número en GesPro |
 
 ## Cómo funciona
 
@@ -101,6 +115,8 @@ Lista las tareas de cada persona con su estado y el total de horas. No escribe n
   otra persona.
 - Las horas se crean con `POST /api/v3/time_entries`; el campo de horas de la tarea no se puede
   editar directo.
-- Antes de escribir, comprueba que la tarea sea del proyecto del grupo. Así un número mal tipeado no
-  cambia tareas de otro proyecto.
+- Antes de escribir, comprueba que la tarea sea de tu proyecto. Así un número mal tipeado no cambia
+  tareas de otro proyecto.
 - No sigue redirecciones, para que el token no termine en otro sitio.
+
+Las mejoras se reciben como issue o pull request.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Cliente de linea de comandos para GesPro (OpenProject) del Grupo 3, CINF100.
+"""Cliente de linea de comandos para GesPro (https://gespro.devhub.cl), el OpenProject de la carrera.
 
 Uso:
+    python gespro.py --proyectos                          proyectos que ve tu token
     python gespro.py --mis-tareas                         tus tareas, con estado, % y horas
     python gespro.py --mis-horas [--desde 2026-09-28]     tus horas ya registradas
     python gespro.py --wp 620 --status "In progress"      cambia el estado de una tarea
@@ -15,8 +16,9 @@ Uso:
 Las opciones de --wp se pueden combinar en una sola llamada. --dry-run muestra lo que haria sin
 escribir nada.
 
-El token se lee de la variable GESPRO_API_KEY o del archivo gespro.env que esta junto a este
-script. Cada persona usa el suyo: las horas quedan a nombre del dueno del token.
+El token (GESPRO_API_KEY) y el proyecto (GESPRO_PROJECT) se leen de variables de entorno o del
+archivo gespro.env que esta junto a este script. --proyecto cambia el proyecto en una llamada.
+Cada persona usa su token: las horas quedan a nombre del dueno del token.
 """
 
 import argparse
@@ -31,19 +33,19 @@ import urllib.request
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-grupo3/1.0"
-PROJECT_IDENTIFIER = "cinf100-202620-con-8528-grupo_3"
-TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
+USER_AGENT = "gespro-cli/1.0"
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 
 
-def read_token():
-    token = os.environ.get("GESPRO_API_KEY", "").strip()
-    if token:
-        return token
+def read_setting(name):
+    """Valor de una variable de entorno o, si no esta, de la linea NOMBRE=valor de gespro.env."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
     try:
-        with open(TOKEN_FILE, encoding="utf-8") as handle:
+        with open(CONFIG_FILE, encoding="utf-8") as handle:
             for line in handle:
-                if line.strip().startswith("GESPRO_API_KEY="):
+                if line.strip().startswith(f"{name}="):
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
     except FileNotFoundError:
         pass
@@ -139,12 +141,33 @@ def elements(payload):
     return payload.get("_embedded", {}).get("elements", [])
 
 
-def find_project(token):
-    # Esta instancia no acepta el filtro "identifier" sobre /projects, pero si la ruta directa.
-    project = request("GET", f"/api/v3/projects/{PROJECT_IDENTIFIER}", token)
-    if not project.get("id"):
-        raise RuntimeError(f"No existe el proyecto {PROJECT_IDENTIFIER} o tu token no lo ve.")
-    return project["id"]
+def visible_projects(token):
+    return elements(request("GET", "/api/v3/projects?pageSize=500", token))
+
+
+def find_project(token, wanted):
+    """El proyecto pedido (identificador o numero) o, si no se pidio, el unico que ve el token."""
+    if wanted:
+        # Esta instancia no acepta el filtro "identifier" sobre /projects, pero si la ruta directa.
+        try:
+            return request("GET", f"/api/v3/projects/{urllib.parse.quote(wanted, safe='')}", token)
+        except RuntimeError:
+            raise RuntimeError(f'Tu token no ve el proyecto "{wanted}". Revisa el nombre con --proyectos.') from None
+    projects = visible_projects(token)
+    if len(projects) == 1:
+        return projects[0]
+    raise RuntimeError(
+        f"Tu token ve {len(projects)} proyectos. Elige uno con GESPRO_PROJECT=... en gespro.env "
+        "o con --proyecto. Los ves con --proyectos."
+    )
+
+
+def list_projects():
+    token = require_token()
+    print("  identificador (va en GESPRO_PROJECT)         nombre")
+    for project in visible_projects(token):
+        print(f"  {project['identifier']:<45} {project['name']}")
+    return 0
 
 
 def me(token):
@@ -187,9 +210,9 @@ def add_comment(token, work_package_id, text):
     return request("POST", f"/api/v3/work_packages/{work_package_id}/activities", token, {"comment": {"raw": text}})
 
 
-def my_tasks():
+def my_tasks(wanted):
     token = require_token()
-    project_id = find_project(token)
+    project_id = find_project(token, wanted)["id"]
     user = me(token)
     # filters con status "*": sin el, la API esconde las tareas cerradas.
     path = with_filters(
@@ -215,9 +238,9 @@ def my_tasks():
     return 0
 
 
-def my_hours(since=None):
+def my_hours(wanted, since=None):
     token = require_token()
-    project_id = find_project(token)
+    project_id = find_project(token, wanted)["id"]
     filters = [
         {"user_id": {"operator": "=", "values": ["me"]}},
         {"project_id": {"operator": "=", "values": [str(project_id)]}},
@@ -239,10 +262,12 @@ def my_hours(since=None):
     return 0
 
 
-def report():
+def report(wanted):
     """Estado del proyecto por persona. No escribe nada."""
     token = require_token()
-    project_id = find_project(token)
+    project = find_project(token, wanted)
+    project_id = project["id"]
+    print(f"{project['name']}\n")
     path = with_filters(f"/api/v3/projects/{project_id}/work_packages", [], pageSize=500)
     rows = elements(request("GET", path, token))
     by_person = {}
@@ -263,13 +288,13 @@ def report():
     return 0
 
 
-def update_work_package(wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None, dry_run=False):
+def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None, dry_run=False):
     token = require_token()
-    project_id = find_project(token)
+    project_id = find_project(token, wanted)["id"]
     work_package = request("GET", f"/api/v3/work_packages/{wp_id}", token)
     # Un numero mal tipeado no puede terminar escribiendo en otro proyecto que el token ve.
     if not work_package["_links"]["project"]["href"].endswith(f"/projects/{project_id}"):
-        raise RuntimeError(f"#{wp_id} no es del proyecto del grupo. No toco nada.")
+        raise RuntimeError(f"#{wp_id} no es de tu proyecto. No toco nada.")
     assignee = (work_package["_links"].get("assignee") or {}).get("title") or "sin asignar"
     print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee})")
     spent_on = day or datetime.date.today().isoformat()
@@ -303,11 +328,11 @@ def update_work_package(wp_id, sprint=None, status=None, percent=None, hours=Non
 
 
 def require_token():
-    token = read_token()
+    token = read_setting("GESPRO_API_KEY")
     if not token:
         raise RuntimeError(
             "Falta tu token. Crealo en https://gespro.devhub.cl/my/access_tokens (seccion API) "
-            f"y guardalo como GESPRO_API_KEY=... en {TOKEN_FILE}"
+            f"y guardalo como GESPRO_API_KEY=... en {CONFIG_FILE}"
         )
     return token
 
@@ -340,13 +365,15 @@ def self_check():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GesPro del Grupo 3 desde la terminal.")
+    parser = argparse.ArgumentParser(description="GesPro desde la terminal.")
     group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--proyectos", action="store_true", help="lista los proyectos que ve tu token")
     group.add_argument("--mis-tareas", action="store_true", help="lista tus tareas")
     group.add_argument("--mis-horas", action="store_true", help="lista tus horas registradas")
     group.add_argument("--wp", type=int, metavar="ID", help="numero de la tarea a actualizar, ej. --wp 620")
     group.add_argument("--report", action="store_true", help="estado del proyecto por persona")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
+    parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
     parser.add_argument("--sprint", help='sprint al que mover la tarea, ej. "Sprint 2"')
     parser.add_argument("--status", help='estado nuevo, ej. "In progress" o "Done"')
     parser.add_argument("--percent", type=percent_arg, help="porcentaje completado, de 0 a 100")
@@ -360,13 +387,17 @@ def main():
     try:
         if args.check:
             return self_check()
+        if args.proyectos:
+            return list_projects()
+        wanted = args.proyecto or read_setting("GESPRO_PROJECT")
         if args.mis_tareas:
-            return my_tasks()
+            return my_tasks(wanted)
         if args.mis_horas:
-            return my_hours(args.desde)
+            return my_hours(wanted, args.desde)
         if args.report:
-            return report()
+            return report(wanted)
         return update_work_package(
+            wanted,
             args.wp,
             sprint=args.sprint,
             status=args.status,
