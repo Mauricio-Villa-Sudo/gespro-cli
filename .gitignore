@@ -1,0 +1,5 @@
+# El token de cada persona nunca se sube.
+gespro.env
+.env
+__pycache__/
+*.pyc
