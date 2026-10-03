@@ -70,7 +70,7 @@ python gespro.py --wp 620 --hours 2.5 --comment "Carrito: suma y quita líneas"
 python gespro.py --wp 620 --hours 1,5 --fecha 2026-09-29
 python gespro.py --wp 620 --sprint "Sprint 2"
 python gespro.py --wp 620 --prioridad High
-python gespro.py --wp 620 --asignar dylan
+python gespro.py --wp 620 --asignar tomas
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
@@ -81,8 +81,8 @@ python gespro.py --wp 620 --asignar dylan
 Si escribes mal un estado, un sprint o una prioridad, el error muestra los nombres válidos de tu
 proyecto. Las prioridades son `Low`, `Normal`, `High` e `Immediate`.
 
-`--asignar` recibe parte del nombre de un miembro, sin importar mayúsculas ni tildes: `dylan`,
-`chavez` o `Matías` sirven. Si el texto calza con más de una persona, el script no cambia nada y
+`--asignar` recibe parte del nombre de un miembro, sin importar mayúsculas ni tildes: `tomas`,
+`perez` o `Tomás` sirven. Si el texto calza con más de una persona, el script no cambia nada y
 muestra los nombres. Para ver los miembros:
 
 ```

@@ -11,7 +11,7 @@ Uso:
     python gespro.py --wp 620 --comment "texto"           deja un comentario
     python gespro.py --wp 620 --sprint "Sprint 2"         mueve la tarea a un sprint
     python gespro.py --wp 620 --prioridad High            prioridad: Low, Normal, High o Immediate
-    python gespro.py --wp 620 --asignar dylan             reasigna la tarea a otro miembro
+    python gespro.py --wp 620 --asignar tomas             reasigna la tarea a otro miembro
     python gespro.py --miembros                           miembros del proyecto (para --asignar)
     python gespro.py --report                             estado del proyecto por persona
     python gespro.py --check                              prueba local, sin red
@@ -179,7 +179,7 @@ def me(token):
 
 
 def plain(text):
-    """Minusculas y sin tildes: "Matías" y "matias" se comparan igual."""
+    """Minusculas y sin tildes: "Tomás" y "tomas" se comparan igual."""
     return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).lower().strip()
 
 
@@ -406,10 +406,10 @@ def self_check():
             pass
     path = with_filters("/api/v3/time_entries", [{"user_id": {"operator": "=", "values": ["me"]}}])
     assert "user_id" in urllib.parse.unquote(path)
-    members = [{"name": "MATÍAS CHÁVEZ MOSQUEIRA"}, {"name": "MAURICIO VILLA COFRÉ"}, {"name": "DYLAN TONIONI FONSECA"}]
-    assert find_member(members, "matias")["name"].startswith("MAT")
-    assert find_member(members, "Chávez")["name"].startswith("MAT")
-    for ambiguous_or_missing in ("ma", "jehyden"):
+    members = [{"name": "TOMÁS PÉREZ SOTO"}, {"name": "TAMARA ÁLVAREZ ROJAS"}, {"name": "CAMILA FERNÁNDEZ DÍAZ"}]
+    assert find_member(members, "tomas")["name"].startswith("TOM")
+    assert find_member(members, "Álvarez")["name"].startswith("TAM")
+    for ambiguous_or_missing in ("ez", "ignacio"):
         try:
             find_member(members, ambiguous_or_missing)
             raise AssertionError(f"find_member acepto {ambiguous_or_missing}")
@@ -438,7 +438,7 @@ def main():
     parser.add_argument("--desde", type=date_arg, help="con --mis-horas: solo desde esta fecha")
     parser.add_argument("--comment", help="comentario para la tarea (tambien acompana a las horas)")
     parser.add_argument("--prioridad", help="prioridad nueva: Low, Normal, High o Immediate")
-    parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. dylan (ver --miembros)")
+    parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. tomas (ver --miembros)")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
 
