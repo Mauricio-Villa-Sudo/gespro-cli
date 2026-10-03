@@ -69,6 +69,8 @@ python gespro.py --wp 620 --percent 50
 python gespro.py --wp 620 --hours 2.5 --comment "Carrito: suma y quita líneas"
 python gespro.py --wp 620 --hours 1,5 --fecha 2026-09-29
 python gespro.py --wp 620 --sprint "Sprint 2"
+python gespro.py --wp 620 --prioridad High
+python gespro.py --wp 620 --asignar dylan
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
@@ -76,7 +78,16 @@ python gespro.py --wp 620 --sprint "Sprint 2"
 - `--comment` queda como comentario en la tarea y también acompaña a las horas.
 - Agrega `--dry-run` para ver lo que haría sin escribir nada. Úsalo la primera vez.
 
-Si escribes mal un estado o un sprint, el error muestra los nombres válidos de tu proyecto.
+Si escribes mal un estado, un sprint o una prioridad, el error muestra los nombres válidos de tu
+proyecto. Las prioridades son `Low`, `Normal`, `High` e `Immediate`.
+
+`--asignar` recibe parte del nombre de un miembro, sin importar mayúsculas ni tildes: `dylan`,
+`chavez` o `Matías` sirven. Si el texto calza con más de una persona, el script no cambia nada y
+muestra los nombres. Para ver los miembros:
+
+```
+python gespro.py --miembros
+```
 
 ### Ver al equipo
 
@@ -107,6 +118,7 @@ Lista las tareas de cada persona del proyecto con su estado y el total de horas.
 | `HTTP 403` | Tu usuario no tiene permiso para eso | Pídeselo a quien administra tu proyecto |
 | `HTTP 409` | Alguien cambió la tarea mientras tanto | Vuelve a ejecutar el comando |
 | `no es de tu proyecto` | El número de tarea es de otro proyecto | Revisa el número en GesPro |
+| `coincide con varios` | El texto de `--asignar` calza con más de un miembro | Escribe más del nombre o el apellido |
 
 ## Cómo funciona
 
@@ -119,4 +131,4 @@ Lista las tareas de cada persona del proyecto con su estado y el total de horas.
   tareas de otro proyecto.
 - No sigue redirecciones, para que el token no termine en otro sitio.
 
-Las mejoras se reciben como issue o pull request.
+Los cambios de cada versión están en [CHANGELOG.md](CHANGELOG.md). Las mejoras se reciben como issue o pull request.

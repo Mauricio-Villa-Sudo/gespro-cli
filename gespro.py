@@ -10,6 +10,9 @@ Uso:
     python gespro.py --wp 620 --hours 2.5 [--fecha 2026-09-29]   registra horas (hoy si no hay fecha)
     python gespro.py --wp 620 --comment "texto"           deja un comentario
     python gespro.py --wp 620 --sprint "Sprint 2"         mueve la tarea a un sprint
+    python gespro.py --wp 620 --prioridad High            prioridad: Low, Normal, High o Immediate
+    python gespro.py --wp 620 --asignar dylan             reasigna la tarea a otro miembro
+    python gespro.py --miembros                           miembros del proyecto (para --asignar)
     python gespro.py --report                             estado del proyecto por persona
     python gespro.py --check                              prueba local, sin red
 
@@ -27,13 +30,14 @@ import datetime
 import json
 import os
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.0"
+USER_AGENT = "gespro-cli/1.2"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 
 
@@ -174,6 +178,35 @@ def me(token):
     return request("GET", "/api/v3/users/me", token)
 
 
+def plain(text):
+    """Minusculas y sin tildes: "Matías" y "matias" se comparan igual."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).lower().strip()
+
+
+def project_members(token, project_id):
+    path = with_filters("/api/v3/principals", [{"member": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
+    return elements(request("GET", path, token))
+
+
+def find_member(members, text):
+    """El unico miembro cuyo nombre contiene el texto; si hay cero o varios, el error los muestra."""
+    matches = [m for m in members if plain(text) in plain(m["name"])]
+    if len(matches) == 1:
+        return matches[0]
+    options = ", ".join(m["name"] for m in (matches or members))
+    problem = "coincide con varios" if matches else "no coincide con nadie"
+    raise RuntimeError(f'"{text}" {problem}. Miembros: {options}')
+
+
+def list_members(wanted):
+    token = require_token()
+    project = find_project(token, wanted)
+    print(f"{project['name']}\n")
+    for member in project_members(token, project["id"]):
+        print(f"  {member['id']:<5} {member['name']}")
+    return 0
+
+
 def find_by_name(token, path, name, what):
     for item in elements(request("GET", path, token)):
         if item["name"].strip().lower() == name.strip().lower():
@@ -223,13 +256,14 @@ def my_tasks(wanted):
     )
     tasks = elements(request("GET", path, token))
     print(f"{user.get('name')}: {len(tasks)} tareas en GesPro\n")
-    print("  #      estado        %    horas  tarea")
+    print("  #      estado       prioridad    %    horas  tarea")
     for item in tasks:
         print(
-            "  #%-5s %-12s %3s%%  %5.1f  %s"
+            "  #%-5s %-12s %-10s %3s%%  %5.1f  %s"
             % (
                 item["id"],
                 item["_links"]["status"]["title"][:12],
+                item["_links"]["priority"]["title"][:10],
                 item.get("percentageDone") or 0,
                 hours_from_iso(item.get("spentTime")),
                 item["subject"][:70],
@@ -288,7 +322,8 @@ def report(wanted):
     return 0
 
 
-def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None, dry_run=False):
+def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None,
+                        priority=None, assignee_text=None, dry_run=False):
     token = require_token()
     project_id = find_project(token, wanted)["id"]
     work_package = request("GET", f"/api/v3/work_packages/{wp_id}", token)
@@ -296,11 +331,15 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
     if not work_package["_links"]["project"]["href"].endswith(f"/projects/{project_id}"):
         raise RuntimeError(f"#{wp_id} no es de tu proyecto. No toco nada.")
     assignee = (work_package["_links"].get("assignee") or {}).get("title") or "sin asignar"
-    print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee})")
+    print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee}, prioridad {work_package['_links']['priority']['title']})")
     spent_on = day or datetime.date.today().isoformat()
+    # Se busca antes de escribir nada, para que un nombre mal escrito no deje la tarea a medio cambiar.
+    new_assignee = find_member(project_members(token, project_id), assignee_text) if assignee_text else None
+    priority_id = find_by_name(token, "/api/v3/priorities", priority, "la prioridad") if priority else None
 
     if dry_run:
-        for label, value in (("sprint", sprint), ("estado", status), ("porcentaje", percent), ("comentario", comment)):
+        for label, value in (("sprint", sprint), ("estado", status), ("porcentaje", percent), ("prioridad", priority),
+                             ("asignada a", new_assignee and new_assignee["name"]), ("comentario", comment)):
             if value is not None:
                 print(f"  (simulacion) pondria {label}: {value}")
         if hours:
@@ -318,6 +357,13 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
     if percent is not None:
         work_package = patch_work_package(token, work_package, percentageDone=percent)
         print(f"  progreso: {work_package['percentageDone']}%")
+    if priority:
+        work_package = link_field(token, work_package, "priority", f"/api/v3/priorities/{priority_id}")
+        print(f"  prioridad: {priority}")
+    if new_assignee:
+        href = new_assignee["_links"]["self"]["href"]
+        work_package = link_field(token, work_package, "assignee", href)
+        print(f"  asignada a: {new_assignee['name']}")
     if hours:
         log_time(token, work_package, round(hours * 60), spent_on, comment)
         print(f"  horas registradas: {hours} el {spent_on}")
@@ -360,6 +406,15 @@ def self_check():
             pass
     path = with_filters("/api/v3/time_entries", [{"user_id": {"operator": "=", "values": ["me"]}}])
     assert "user_id" in urllib.parse.unquote(path)
+    members = [{"name": "MATÍAS CHÁVEZ MOSQUEIRA"}, {"name": "MAURICIO VILLA COFRÉ"}, {"name": "DYLAN TONIONI FONSECA"}]
+    assert find_member(members, "matias")["name"].startswith("MAT")
+    assert find_member(members, "Chávez")["name"].startswith("MAT")
+    for ambiguous_or_missing in ("ma", "jehyden"):
+        try:
+            find_member(members, ambiguous_or_missing)
+            raise AssertionError(f"find_member acepto {ambiguous_or_missing}")
+        except RuntimeError:
+            pass
     print("autotest: todo bien")
     return 0
 
@@ -372,6 +427,7 @@ def main():
     group.add_argument("--mis-horas", action="store_true", help="lista tus horas registradas")
     group.add_argument("--wp", type=int, metavar="ID", help="numero de la tarea a actualizar, ej. --wp 620")
     group.add_argument("--report", action="store_true", help="estado del proyecto por persona")
+    group.add_argument("--miembros", action="store_true", help="lista los miembros del proyecto")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
     parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
     parser.add_argument("--sprint", help='sprint al que mover la tarea, ej. "Sprint 2"')
@@ -381,6 +437,8 @@ def main():
     parser.add_argument("--fecha", type=date_arg, help="dia de las horas, AAAA-MM-DD (por defecto, hoy)")
     parser.add_argument("--desde", type=date_arg, help="con --mis-horas: solo desde esta fecha")
     parser.add_argument("--comment", help="comentario para la tarea (tambien acompana a las horas)")
+    parser.add_argument("--prioridad", help="prioridad nueva: Low, Normal, High o Immediate")
+    parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. dylan (ver --miembros)")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
 
@@ -396,6 +454,8 @@ def main():
             return my_hours(wanted, args.desde)
         if args.report:
             return report(wanted)
+        if args.miembros:
+            return list_members(wanted)
         return update_work_package(
             wanted,
             args.wp,
@@ -405,6 +465,8 @@ def main():
             hours=args.hours,
             day=args.fecha,
             comment=args.comment,
+            priority=args.prioridad,
+            assignee_text=args.asignar,
             dry_run=args.dry_run,
         )
     except (RuntimeError, KeyError, ValueError) as error:
