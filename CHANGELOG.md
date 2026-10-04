@@ -2,6 +2,25 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.3.0, 4 de octubre de 2026
+
+### Agregado
+
+- `--commit`: lee el último commit, comenta en cada tarea mencionada como `OP#número` con el enlace al
+  commit y registra la línea `Horas: N` del mensaje cuando menciona una sola tarea. Si se ejecuta dos
+  veces, no repite el comentario ni las horas. Tampoco vuelve a registrar las horas de un commit que
+  sale de un `--amend`, un rebase o un cherry-pick.
+- `--en-texto`: aplica las opciones de `--wp` a cada tarea mencionada como `OP#número` en un texto, por
+  ejemplo la descripción de un PR. Si una tarea da error, sigue con las demás.
+- `GUIA-AUTOMATIZACION.md`: cómo automatizarlo con un hook de Git, GitHub Actions, la integración de
+  GesPro con GitHub y un asistente de IA.
+- `ejemplos/`: hook `post-commit`, workflow `gespro-pr.yml` e instrucciones para un asistente de IA.
+- El README explica dónde clonar el script.
+
+### Cambiado
+
+- `--status` y `--sprint` también se revisan antes de escribir nada, incluso con `--dry-run`.
+
 ## 1.2.0, 3 de octubre de 2026
 
 ### Agregado

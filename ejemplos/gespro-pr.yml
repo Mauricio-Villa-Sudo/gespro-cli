@@ -1,0 +1,47 @@
+# Workflow de GitHub Actions: avisa en GesPro cuando se abre y cuando se integra un pull request.
+# Usa las tareas que el titulo o la descripcion del PR mencionan como OP#numero: todas pasan a
+# In Review, asi que menciona solo las que el PR resuelve.
+#
+# Instalacion (ver GUIA-AUTOMATIZACION.md):
+# 1. Copia gespro.py a scripts/gespro.py dentro de tu repositorio.
+# 2. Copia este archivo a .github/workflows/gespro-pr.yml.
+# 3. En GitHub, Settings > Secrets and variables > Actions:
+#    - secreto GESPRO_API_KEY con el token de GesPro;
+#    - variable GESPRO_PROJECT con el identificador del proyecto.
+#    Crear secretos exige ser administrador del repositorio.
+
+name: GesPro
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  avisar:
+    # Los PR que vienen de un fork no reciben secretos: sin token no hay nada que avisar.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GESPRO_API_KEY: ${{ secrets.GESPRO_API_KEY }}
+      GESPRO_PROJECT: ${{ vars.GESPRO_PROJECT }}
+      # El texto del PR va por variable de entorno y no dentro del comando: asi nadie puede
+      # inyectar instrucciones de shell escribiendo en el titulo o la descripcion.
+      PR_TEXT: ${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PR abierto
+        if: github.event.action == 'opened'
+        run: python scripts/gespro.py --en-texto="$PR_TEXT" --status "In Review" --comment "PR abierto: $PR_URL"
+
+      - name: PR integrado
+        if: github.event.action == 'closed' && github.event.pull_request.merged
+        run: python scripts/gespro.py --en-texto="$PR_TEXT" --comment "PR integrado: $PR_URL"

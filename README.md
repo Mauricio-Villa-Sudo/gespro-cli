@@ -8,6 +8,14 @@ que instalar nada.
 
 ## 1. Configuración
 
+### Descarga
+
+Clona el repositorio en tu carpeta personal. La guía de automatización y los ejemplos usan esa ruta:
+
+```
+git clone https://github.com/Mauricio-Villa-Sudo/gespro-cli ~/gespro-cli
+```
+
 ### Tu token
 
 Cada persona usa su propio token. GesPro registra las horas a nombre del dueño del token: con el
@@ -88,6 +96,25 @@ muestra los nombres. Para ver los miembros:
 ```
 python gespro.py --miembros
 ```
+
+### Desde un commit o un PR
+
+Si el mensaje del commit menciona la tarea como `OP#620`, el script la encuentra solo:
+
+```
+python gespro.py --commit --dry-run
+python gespro.py --commit
+python gespro.py --en-texto "Cierra OP#620 y OP#621" --status "In Review"
+```
+
+`--commit` lee el último commit y deja en cada tarea mencionada un comentario con el enlace al commit.
+Si el mensaje trae una línea `Horas: 1,5` y menciona una sola tarea, también registra esas horas. Si
+lo ejecutas dos veces, no repite nada. `--en-texto` aplica las mismas opciones de `--wp` a cada tarea
+mencionada en el texto, por ejemplo la descripción de un PR. Si una de las tareas da error, sigue con
+las demás.
+
+Para que esto pase solo con un hook de Git, con GitHub Actions o con un asistente de IA, mira
+[GUIA-AUTOMATIZACION.md](GUIA-AUTOMATIZACION.md).
 
 ### Ver al equipo
 

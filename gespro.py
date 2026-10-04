@@ -13,6 +13,8 @@ Uso:
     python gespro.py --wp 620 --prioridad High            prioridad: Low, Normal, High o Immediate
     python gespro.py --wp 620 --asignar tomas             reasigna la tarea a otro miembro
     python gespro.py --miembros                           miembros del proyecto (para --asignar)
+    python gespro.py --commit                             avisa en las tareas OP#numero del ultimo commit
+    python gespro.py --en-texto "texto con OP#620" --status "In Review"   aplica a las tareas del texto
     python gespro.py --report                             estado del proyecto por persona
     python gespro.py --check                              prueba local, sin red
 
@@ -26,9 +28,13 @@ Cada persona usa su token: las horas quedan a nombre del dueno del token.
 
 import argparse
 import base64
+import contextlib
 import datetime
+import io
 import json
 import os
+import re
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -37,8 +43,14 @@ import urllib.request
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.2"
+USER_AGENT = "gespro-cli/1.3"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
+# Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
+REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
+# Linea "Horas: 1,5" (o "Hours: 1.5") sola en el mensaje del commit.
+HOURS_LINE = re.compile(r"^[ \t]*(?:horas|hours)[ \t]*:(.*)$", re.IGNORECASE | re.MULTILINE)
+# Accion del reflog de un commit nuevo. amend, rebase y cherry-pick repiten un mensaje que ya se registro.
+NEW_COMMIT = {"commit", "commit (initial)", "commit (merge)"}
 
 
 def read_setting(name):
@@ -79,6 +91,31 @@ def date_arg(value):
     if day > datetime.date.today():
         raise argparse.ArgumentTypeError("no se registran horas en fechas futuras")
     return day.isoformat()
+
+
+def references(text):
+    """Numeros de tarea escritos como OP#533 en un texto, sin repetir y en orden."""
+    return sorted({int(number) for number in REFERENCE.findall(text or "")} - {0})
+
+
+def hours_in(text):
+    """Horas de la linea "Horas: 1,5" de un mensaje, o None si no la tiene."""
+    values = [value.strip() for value in HOURS_LINE.findall(text or "")]
+    if not values:
+        return None
+    if len(values) > 1:
+        raise RuntimeError(f"Hay {len(values)} lineas Horas: y solo puede haber una.")
+    try:
+        return hours_arg(values[0])
+    except (argparse.ArgumentTypeError, ValueError):
+        raise RuntimeError(f'La linea "Horas: {values[0]}" no sirve: escribe solo el numero, por ejemplo Horas: 1,5.') from None
+
+
+def github_commit_url(remote, full_hash):
+    """Enlace al commit si el remoto es de GitHub. Un remoto con usuario o token en la URL no calza,
+    asi esos datos nunca terminan en un comentario."""
+    match = re.match(r"^(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?$", remote or "")
+    return f"https://github.com/{match.group(1)}/commit/{full_hash}" if match else None
 
 
 def iso_duration(minutes):
@@ -239,6 +276,16 @@ def log_time(token, work_package, minutes, spent_on, comment):
     return request("POST", "/api/v3/time_entries", token, payload)
 
 
+def already_noted(token, work_package_id, tag):
+    """True si la tarea ya tiene un comentario o una entrada de horas con esa marca (el hash del commit).
+    Asi, correr el hook dos veces no repite nada."""
+    activities = elements(request("GET", f"/api/v3/work_packages/{work_package_id}/activities", token))
+    if any(tag in ((a.get("comment") or {}).get("raw") or "") for a in activities):
+        return True
+    path = with_filters("/api/v3/time_entries", [{"entity_id": {"operator": "=", "values": [str(work_package_id)]}}], pageSize=500)
+    return any(tag in ((e.get("comment") or {}).get("raw") or "") for e in elements(request("GET", path, token)))
+
+
 def add_comment(token, work_package_id, text):
     return request("POST", f"/api/v3/work_packages/{work_package_id}/activities", token, {"comment": {"raw": text}})
 
@@ -323,7 +370,7 @@ def report(wanted):
 
 
 def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None,
-                        priority=None, assignee_text=None, dry_run=False):
+                        priority=None, assignee_text=None, dry_run=False, time_comment=None, tag=None):
     token = require_token()
     project_id = find_project(token, wanted)["id"]
     work_package = request("GET", f"/api/v3/work_packages/{wp_id}", token)
@@ -336,6 +383,12 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
     # Se busca antes de escribir nada, para que un nombre mal escrito no deje la tarea a medio cambiar.
     new_assignee = find_member(project_members(token, project_id), assignee_text) if assignee_text else None
     priority_id = find_by_name(token, "/api/v3/priorities", priority, "la prioridad") if priority else None
+    version_id = find_by_name(token, f"/api/v3/projects/{project_id}/versions", sprint, "el sprint") if sprint else None
+    status_id = find_by_name(token, "/api/v3/statuses", status, "el estado") if status else None
+
+    if tag and already_noted(token, wp_id, tag):
+        print(f"  ya tiene registrado {tag}; no repito el comentario ni las horas")
+        comment, hours = None, None
 
     if dry_run:
         for label, value in (("sprint", sprint), ("estado", status), ("porcentaje", percent), ("prioridad", priority),
@@ -347,11 +400,9 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
         return 0
 
     if sprint:
-        version_id = find_by_name(token, f"/api/v3/projects/{project_id}/versions", sprint, "el sprint")
         work_package = link_field(token, work_package, "version", f"/api/v3/versions/{version_id}")
         print(f"  sprint: {sprint}")
     if status:
-        status_id = find_by_name(token, "/api/v3/statuses", status, "el estado")
         work_package = link_field(token, work_package, "status", f"/api/v3/statuses/{status_id}")
         print(f"  estado: {status}")
     if percent is not None:
@@ -365,12 +416,75 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
         work_package = link_field(token, work_package, "assignee", href)
         print(f"  asignada a: {new_assignee['name']}")
     if hours:
-        log_time(token, work_package, round(hours * 60), spent_on, comment)
+        log_time(token, work_package, round(hours * 60), spent_on, time_comment or comment)
         print(f"  horas registradas: {hours} el {spent_on}")
     if comment:
         add_comment(token, wp_id, comment)
         print("  comentario agregado")
     return 0
+
+
+def update_references(wanted, text, hours=None, **changes):
+    """Aplica los cambios a cada tarea mencionada como OP#numero en el texto."""
+    ids = references(text)
+    if not ids:
+        print("El texto no menciona tareas como OP#numero. No hago nada.")
+        return 0
+    if hours and len(ids) > 1:
+        listed = ", ".join(f"OP#{i}" for i in ids)
+        raise RuntimeError(f"Hay {len(ids)} tareas ({listed}) y no se como repartir las horas. "
+                           "Menciona una sola o registra las horas con --wp.")
+    # Una referencia mala (OP#999, o una tarea de otro proyecto) no frena a las demas.
+    failed = 0
+    for wp_id in ids:
+        try:
+            update_work_package(wanted, wp_id, hours=hours, **changes)
+        except RuntimeError as error:
+            print(f"#{wp_id}: Error: {error}")
+            failed += 1
+    return 1 if failed else 0
+
+
+def git(*args, check=True):
+    # Git escribe UTF-8; sin encoding, Windows lo leeria como cp1252 y romperia las tildes.
+    result = subprocess.run(["git", *args], capture_output=True, encoding="utf-8", errors="replace", check=check)
+    return result.stdout.strip()
+
+
+def hours_from_message(message, action):
+    """Horas de la linea "Horas:" del commit, o None con un aviso si no corresponde registrarlas."""
+    try:
+        hours = hours_in(message)
+    except RuntimeError as error:
+        print(f"Aviso: {error} No registro horas; hazlo con --wp N --hours X.")
+        return None
+    if hours and action and action not in NEW_COMMIT:
+        print(f"Aviso: el commit viene de un {action}; no registro sus horas para no duplicarlas.")
+        return None
+    if hours and len(references(message)) > 1:
+        print("Aviso: el commit menciona varias tareas; comento en todas, pero las horas registralas con --wp.")
+        return None
+    return hours
+
+
+def from_last_commit(wanted, hours=None, comment=None, **changes):
+    """Lee el ultimo commit: comenta en sus tareas OP#numero y registra la linea "Horas:" si la trae."""
+    try:
+        message = git("log", "-1", "--pretty=%B")
+        full_hash = git("rev-parse", "HEAD")
+    except (OSError, subprocess.CalledProcessError):
+        raise RuntimeError("No encuentro el ultimo commit: ejecuta esto dentro de un repositorio de Git con commits.") from None
+    remote = git("remote", "get-url", "origin", check=False)
+    action = git("reflog", "-1", "--format=%gs", check=False).split(":")[0]
+    short = full_hash[:7]
+    subject = message.splitlines()[0] if message else short
+    url = github_commit_url(remote, full_hash)
+    # El hash va siempre en el comentario: es la marca con que already_noted evita repetirlo.
+    note = f"{comment} ({short})" if comment else f"Commit {short}: {subject}" + (f" {url}" if url else "")
+    return update_references(
+        wanted, message, hours=hours if hours is not None else hours_from_message(message, action),
+        comment=note, time_comment=f"{subject} ({short})", tag=short, **changes,
+    )
 
 
 def require_token():
@@ -415,6 +529,27 @@ def self_check():
             raise AssertionError(f"find_member acepto {ambiguous_or_missing}")
         except RuntimeError:
             pass
+    assert references("fix: carrito OP#533 y op#560, de nuevo OP#533") == [533, 560]
+    assert references("sin referencia, ni XOP#12 ni OP#") == []
+    assert hours_in("feat: algo\n\nOP#533\nHoras: 1,5\n") == 1.5 and hours_in("Hours: 2") == 2.0
+    assert hours_in("dice Horas: 3 en medio de una frase") is None and hours_in("") is None
+    assert hours_in("Horas: 2\xa0") == 2.0 and references("OP#0 y OP#7") == [7]
+    for bad in ("Horas: 30", "Horas: 2h", "Horas: 1:30", "Horas: 1\nHoras: 2"):
+        try:
+            hours_in(bad)
+            raise AssertionError(f"hours_in acepto {bad!r}")
+        except RuntimeError:
+            pass
+    with contextlib.redirect_stdout(io.StringIO()):  # los avisos son esperados aca
+        assert hours_from_message("feat: x OP#533\nHoras: 2", "commit") == 2.0
+        assert hours_from_message("feat: x OP#533\nHoras: 2", "") == 2.0
+        assert hours_from_message("feat: x OP#533\nHoras: 2", "commit (amend)") is None
+        assert hours_from_message("feat: x OP#533 OP#560\nHoras: 2", "commit") is None
+        assert hours_from_message("feat: x OP#533\nHoras: 2h", "commit") is None
+    assert github_commit_url("git@github.com:ana/repo.git", "abc") == "https://github.com/ana/repo/commit/abc"
+    assert github_commit_url("https://github.com/ana/repo", "abc") == "https://github.com/ana/repo/commit/abc"
+    assert github_commit_url("https://ana:token123@github.com/ana/repo.git", "abc") is None
+    assert github_commit_url("https://gitlab.com/ana/repo.git", "abc") is None
     print("autotest: todo bien")
     return 0
 
@@ -428,6 +563,8 @@ def main():
     group.add_argument("--wp", type=int, metavar="ID", help="numero de la tarea a actualizar, ej. --wp 620")
     group.add_argument("--report", action="store_true", help="estado del proyecto por persona")
     group.add_argument("--miembros", action="store_true", help="lista los miembros del proyecto")
+    group.add_argument("--commit", action="store_true", help="avisa en las tareas OP#numero del ultimo commit")
+    group.add_argument("--en-texto", metavar="TEXTO", help="aplica los cambios a las tareas OP#numero del texto")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
     parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
     parser.add_argument("--sprint", help='sprint al que mover la tarea, ej. "Sprint 2"')
@@ -456,6 +593,12 @@ def main():
             return report(wanted)
         if args.miembros:
             return list_members(wanted)
+        changes = dict(sprint=args.sprint, status=args.status, percent=args.percent, day=args.fecha,
+                       priority=args.prioridad, assignee_text=args.asignar, dry_run=args.dry_run)
+        if args.commit:
+            return from_last_commit(wanted, hours=args.hours, comment=args.comment, **changes)
+        if args.en_texto is not None:
+            return update_references(wanted, args.en_texto, hours=args.hours, comment=args.comment, **changes)
         return update_work_package(
             wanted,
             args.wp,

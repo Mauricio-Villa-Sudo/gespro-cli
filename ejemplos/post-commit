@@ -1,0 +1,32 @@
+#!/bin/sh
+# Hook de Git: despues de cada commit avisa en GesPro a las tareas que el mensaje menciona como
+# OP#numero, y registra las horas si el mensaje trae una linea "Horas: 1,5".
+#
+# Instalacion: copia este archivo a .git/hooks/post-commit de tu repositorio y, en Linux o macOS,
+# dale permiso de ejecucion con: chmod +x .git/hooks/post-commit
+# Cambia GESPRO por la ruta donde dejaste gespro.py (y su gespro.env con tu token y tu proyecto).
+
+GESPRO="$HOME/gespro-cli/gespro.py"
+
+if [ ! -f "$GESPRO" ]; then
+    echo "gespro: no encuentro $GESPRO; corrige la variable GESPRO en .git/hooks/post-commit"
+    exit 0
+fi
+
+# En Windows, "python3" suele ser un acceso directo a la Microsoft Store que no ejecuta nada,
+# por eso se usa el primero que de verdad corre.
+PYTHON=""
+for candidate in python3 python py; do
+    if "$candidate" -c "" >/dev/null 2>&1; then
+        PYTHON=$candidate
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "gespro: no encuentro Python; el commit quedo hecho, pero GesPro no se entero"
+    exit 0
+fi
+
+# Un problema con GesPro (sin internet, token vencido) nunca debe impedir el commit.
+"$PYTHON" "$GESPRO" --commit || echo "gespro: no pude avisar en GesPro; revisalo con --commit --dry-run"
+exit 0
