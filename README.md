@@ -151,9 +151,20 @@ Para que esto pase solo con un hook de Git, con GitHub Actions o con un asistent
 
 ```
 python gespro.py --report
+python gespro.py --sprint-actual
+python gespro.py --horas-equipo
+python gespro.py --horas-equipo --desde 2026-09-28
 ```
 
-Lista las tareas de cada persona del proyecto con su estado y el total de horas. No escribe nada.
+Ninguno escribe nada.
+
+- `--report` lista las tareas de cada persona del proyecto con su estado y el total de horas.
+- `--sprint-actual` muestra el sprint en curso y cuántos días le quedan, las tareas abiertas y
+  cerradas de cada persona, tus tareas abiertas y las que siguen abiertas en sprints que ya
+  terminaron. Si hoy cae entre dos sprints, muestra el próximo.
+- `--horas-equipo` suma las horas de cada integrante desde el lunes, o desde `--desde`, y dice quién no
+  ha registrado. Solo cuenta a quienes tienen rol Developer, así que el docente y el ayudante no
+  salen en esa lista.
 
 ## 3. Buenas prácticas
 

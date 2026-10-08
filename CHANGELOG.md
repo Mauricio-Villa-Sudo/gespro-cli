@@ -13,6 +13,10 @@ Los cambios de cada versión, del más nuevo al más antiguo.
 - `--editar-horas` y `--borrar-horas`: corrigen o borran un registro tuyo de `--mis-horas`. Los de
   otra persona no se tocan. En la terminal, `--borrar-horas` pide escribir `si` antes de borrar.
 - `--mis-horas` muestra el `id` de cada registro.
+- `--sprint-actual`: el sprint en curso con los días que le quedan, las tareas abiertas y cerradas de
+  cada persona, tus tareas abiertas y lo que quedó abierto de sprints anteriores.
+- `--horas-equipo`: las horas de cada integrante desde el lunes, o desde `--desde`, y quién con rol
+  Developer no ha registrado.
 
 ### Corregido
 

@@ -20,6 +20,8 @@ Uso:
     python gespro.py --commit                             avisa en las tareas OP#numero del ultimo commit
     python gespro.py --en-texto "texto con OP#620" --status "In Review"   aplica a las tareas del texto
     python gespro.py --report                             estado del proyecto por persona
+    python gespro.py --sprint-actual                      el sprint en curso y lo que quedo abierto de los anteriores
+    python gespro.py --horas-equipo [--desde 2026-10-01]  horas de cada integrante (desde el lunes si no hay fecha)
     python gespro.py --check                              prueba local, sin red
 
 Las opciones de --wp se pueden combinar en una sola llamada. --dry-run muestra lo que haria sin
@@ -328,17 +330,24 @@ def my_tasks(wanted):
     return 0
 
 
-def my_hours(wanted, since=None):
-    token = require_token()
-    project_id = find_project(token, wanted)["id"]
-    filters = [
-        {"user_id": {"operator": "=", "values": ["me"]}},
-        {"project_id": {"operator": "=", "values": [str(project_id)]}},
-    ]
+def project_time_entries(token, project_id, since=None, only_mine=False):
+    filters = [{"project_id": {"operator": "=", "values": [str(project_id)]}}]
+    if only_mine:
+        filters.append({"user_id": {"operator": "=", "values": ["me"]}})
     if since:
         filters.append({"spent_on": {"operator": "<>d", "values": [since, datetime.date.today().isoformat()]}})
     path = with_filters("/api/v3/time_entries", filters, pageSize=500, sortBy=json.dumps([["spent_on", "asc"]]))
-    entries = elements(request("GET", path, token))
+    payload = request("GET", path, token)
+    entries = elements(payload)
+    if payload.get("total", 0) > len(entries):
+        print(f"Aviso: hay {payload['total']} registros y muestro {len(entries)}. Acota con --desde.")
+    return entries
+
+
+def my_hours(wanted, since=None):
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    entries = project_time_entries(token, project_id, since, only_mine=True)
     print(ENTRY_HEADER)
     for entry in entries:
         print(entry_line(entry))
@@ -437,6 +446,93 @@ def report(wanted):
             )
         print()
     return 0
+
+
+def split_sprints(versions, today):
+    """El sprint en curso (o el proximo, si hoy cae entre dos) y los que ya terminaron.
+    Las versiones sin fechas, como el Product Backlog, no cuentan."""
+    dated = sorted((v for v in versions if v.get("startDate") and v.get("endDate")), key=lambda v: v["startDate"])
+    pending = [v for v in dated if v["endDate"] >= today]
+    return (pending[0] if pending else None), [v for v in dated if v["endDate"] < today]
+
+
+def sprint_status(wanted):
+    """El sprint en curso por persona, tus tareas abiertas y lo que quedo abierto de sprints anteriores."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    today = datetime.date.today().isoformat()
+    current, ended = split_sprints(elements(request("GET", f"/api/v3/projects/{project_id}/versions", token)), today)
+    closed = {s["_links"]["self"]["href"] for s in elements(request("GET", "/api/v3/statuses", token)) if s.get("isClosed")}
+    my_href = me(token)["_links"]["self"]["href"]
+    tasks_path = f"/api/v3/projects/{project_id}/work_packages"
+    if current:
+        start, end = current["startDate"], current["endDate"]
+        left = (datetime.date.fromisoformat(end) - datetime.date.today()).days
+        when = f"empieza el {start}" if start > today else ("termina hoy" if left == 0 else f"termina en {left} dias")
+        print(f"{current['name']}: del {start} al {end}, {when}\n")
+        filters = [{"version": {"operator": "=", "values": [str(current["id"])]}}, {"status": {"operator": "*", "values": []}}]
+        tasks = elements(request("GET", with_filters(tasks_path, filters, pageSize=500), token))
+        counts = {}
+        for item in tasks:
+            who = (item["_links"].get("assignee") or {}).get("title") or "SIN ASIGNAR"
+            is_closed = item["_links"]["status"]["href"] in closed
+            open_count, closed_count = counts.get(who, (0, 0))
+            counts[who] = (open_count + (not is_closed), closed_count + is_closed)
+        print(f"  {'persona':<32} abiertas  cerradas")
+        for who in sorted(counts):
+            print(f"  {who[:32]:<32} {counts[who][0]:>8}  {counts[who][1]:>8}")
+        mine = [i for i in tasks if (i["_links"].get("assignee") or {}).get("href") == my_href
+                and i["_links"]["status"]["href"] not in closed]
+        print(f"\nTus tareas abiertas: {len(mine)}")
+        for item in mine:
+            print(f"  #{item['id']:<5} {item['_links']['status']['title'][:12]:<12} {item.get('percentageDone') or 0:>3}%  {item['subject'][:60]}")
+    else:
+        print("No hay sprints con fechas por delante.")
+    if ended:
+        filters = [{"version": {"operator": "=", "values": [str(v["id"]) for v in ended]}}, {"status": {"operator": "o", "values": []}}]
+        left_over = elements(request("GET", with_filters(tasks_path, filters, pageSize=500), token))
+        print(f"\nSiguen abiertas de sprints que ya terminaron: {len(left_over)}")
+        for item in left_over:
+            who = (item["_links"].get("assignee") or {}).get("title") or "SIN ASIGNAR"
+            print(f"  #{item['id']:<5} {item['_links']['version']['title'][:10]:<10} {item['_links']['status']['title'][:12]:<12} "
+                  f"{who[:22]:<22} {item['subject'][:40]}")
+    return 0
+
+
+def hours_by_person(entries):
+    """Horas y dias con registro de cada persona."""
+    people = {}
+    for entry in entries:
+        who = entry["_links"]["user"].get("title") or "?"
+        total, days = people.get(who, (0.0, frozenset()))
+        people[who] = (total + hours_from_iso(entry.get("hours")), days | {entry["spentOn"]})
+    return people
+
+
+def team_hours(wanted, since=None):
+    """Horas de cada integrante desde una fecha (por defecto, el lunes), y quien no ha registrado."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    today = datetime.date.today()
+    since = since or (today - datetime.timedelta(days=today.weekday())).isoformat()
+    people = hours_by_person(project_time_entries(token, project_id, since))
+    print(f"Horas del {since} al {today.isoformat()}\n")
+    print(f"  {'persona':<32} horas  dias  ultimo dia")
+    for who, (total, days) in sorted(people.items(), key=lambda item: -item[1][0]):
+        print(f"  {who[:32]:<32} {total:5.2f}  {len(days):>4}  {max(days)}")
+    missing = sorted(set(developers(token, project_id)) - set(people))
+    print(f"\n  Sin horas en estas fechas: {', '.join(missing) if missing else 'nadie'}")
+    return 0
+
+
+def developers(token, project_id):
+    """Los miembros con rol Developer, para no contar al docente ni al ayudante. Si el proyecto no usa
+    ese rol, todos los miembros."""
+    path = with_filters("/api/v3/memberships", [{"project": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
+    memberships = elements(request("GET", path, token))
+    names = [m["_links"]["principal"]["title"] for m in memberships
+             if any(role.get("title") == "Developer" for role in m["_links"].get("roles", []))]
+    return names or [m["_links"]["principal"]["title"] for m in memberships]
 
 
 def task_in_project(token, wp_id, project_id):
@@ -768,6 +864,59 @@ def check_new_commands():
         assert writes == []
 
 
+def check_team_views():
+    """--sprint-actual y --horas-equipo, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    sprints = [{"id": 1, "name": "Sprint 1", "startDate": "2026-09-09", "endDate": "2026-09-23"},
+               {"id": 2, "name": "Sprint 2", "startDate": "2026-09-24", "endDate": "2026-10-06"},
+               {"id": 3, "name": "Sprint 3", "startDate": "2026-10-08", "endDate": "2026-10-21"},
+               {"id": 9, "name": "Product Backlog", "startDate": None, "endDate": None}]
+    assert [s["id"] for s in [split_sprints(sprints, "2026-10-08")[0]] + split_sprints(sprints, "2026-10-08")[1]] == [3, 1, 2]
+    assert split_sprints(sprints, "2026-10-07")[0]["id"] == 3  # entre dos sprints, el proximo
+    assert split_sprints(sprints, "2026-10-21")[0]["id"] == 3  # el ultimo dia todavia cuenta
+    assert split_sprints(sprints, "2026-11-30") == (None, sprints[:3])
+
+    def task(task_id, user_id, status):
+        return {"id": task_id, "subject": f"Tarea {task_id}", "percentageDone": 0,
+                "_links": {"assignee": {"href": f"/api/v3/users/{user_id}", "title": f"P{user_id}"},
+                           "status": {"href": f"/api/v3/statuses/{status}", "title": "S"},
+                           "version": {"title": "Sprint 2"}}}
+
+    def hours(user_id, day, duration):
+        return {"spentOn": day, "hours": duration, "_links": {"user": {"title": f"P{user_id}"}}}
+
+    entries = [hours(1, "2026-10-06", "PT2H"), hours(1, "2026-10-07", "PT30M"), hours(2, "2026-10-07", "PT1H")]
+    assert hours_by_person(entries) == {"P1": (2.5, {"2026-10-06", "2026-10-07"}), "P2": (1.0, {"2026-10-07"})}
+
+    def fake_request(method, path, token, payload=None):
+        query = urllib.parse.unquote(path)
+        if "/versions" in path:
+            return {"_embedded": {"elements": sprints}}
+        if "/statuses" in path:
+            return {"_embedded": {"elements": [{"isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}}
+        if "/work_packages" in path:  # el sprint en curso, o lo que quedo abierto de los anteriores
+            rows = [task(10, 1, 1), task(11, 1, 7), task(12, 2, 1)] if '"*"' in query else [task(5, 2, 1)]
+            return {"_embedded": {"elements": rows}}
+        if "/time_entries" in path:
+            return {"total": 3, "_embedded": {"elements": entries}}
+        if "/memberships" in path:
+            roles = (("P1", "Developer"), ("P2", "Developer"), ("P3", "Developer"), ("P4", "Docente"))
+            return {"_embedded": {"elements": [{"_links": {"principal": {"title": name}, "roles": [{"title": role}]}}
+                                               for name, role in roles]}}
+        return {"id": 7, "_links": {"self": {"href": "/api/v3/users/1"}}}  # el proyecto y /users/me
+
+    output = io.StringIO()
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
+            contextlib.redirect_stdout(output):
+        sprint_status("demo")
+        team_hours("demo", "2026-10-01")
+    text = output.getvalue()
+    assert "Tus tareas abiertas: 1\n  #10 " in text and "#11" not in text
+    assert "Siguen abiertas de sprints que ya terminaron: 1" in text
+    assert "Sin horas en estas fechas: P3\n" in text  # P4 es docente
+
+
 def self_check():
     assert iso_duration(360) == "PT6H" and iso_duration(15) == "PT15M" and iso_duration(137) == "PT2H17M"
     assert hours_from_iso("PT2H30M") == 2.5 and hours_from_iso("PT45M") == 0.75 and hours_from_iso(None) == 0
@@ -824,6 +973,7 @@ def self_check():
     assert github_commit_url("https://gitlab.com/ana/repo.git", "abc") is None
     check_api_flows()
     check_new_commands()
+    check_team_views()
     print("autotest: todo bien")
     return 0
 
@@ -836,6 +986,8 @@ def main():
     group.add_argument("--mis-horas", action="store_true", help="lista tus horas registradas")
     group.add_argument("--wp", type=int, metavar="ID", help="numero de la tarea a actualizar, ej. --wp 620")
     group.add_argument("--report", action="store_true", help="estado del proyecto por persona")
+    group.add_argument("--sprint-actual", action="store_true", help="el sprint en curso y lo que quedo abierto")
+    group.add_argument("--horas-equipo", action="store_true", help="horas de cada integrante (desde el lunes)")
     group.add_argument("--miembros", action="store_true", help="lista los miembros del proyecto")
     group.add_argument("--commit", action="store_true", help="avisa en las tareas OP#numero del ultimo commit")
     group.add_argument("--en-texto", metavar="TEXTO", help="aplica los cambios a las tareas OP#numero del texto")
@@ -852,7 +1004,7 @@ def main():
     parser.add_argument("--percent", type=percent_arg, help="porcentaje completado, de 0 a 100")
     parser.add_argument("--hours", type=hours_arg, help="horas trabajadas (acepta 2,5)")
     parser.add_argument("--fecha", type=date_arg, help="dia de las horas, AAAA-MM-DD (por defecto, hoy)")
-    parser.add_argument("--desde", type=date_arg, help="con --mis-horas: solo desde esta fecha")
+    parser.add_argument("--desde", type=date_arg, help="con --mis-horas o --horas-equipo: desde esta fecha")
     parser.add_argument("--comment", help="comentario para la tarea (tambien acompana a las horas)")
     parser.add_argument("--prioridad", help="prioridad nueva: Low, Normal, High o Immediate")
     parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. tomas (ver --miembros)")
@@ -871,6 +1023,10 @@ def main():
             return my_hours(wanted, args.desde)
         if args.report:
             return report(wanted)
+        if args.sprint_actual:
+            return sprint_status(wanted)
+        if args.horas_equipo:
+            return team_hours(wanted, args.desde)
         if args.miembros:
             return list_members(wanted)
         if args.editar_horas is not None:

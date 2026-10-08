@@ -6,7 +6,8 @@ archivo del repositorio o en un commit.
 
 Comandos que puedes usar:
 
-- Leer: `--mis-tareas`, `--mis-horas --desde AAAA-MM-DD`, `--report`, `--miembros`.
+- Leer: `--mis-tareas`, `--mis-horas --desde AAAA-MM-DD`, `--report`, `--sprint-actual`,
+  `--horas-equipo`, `--miembros`.
 - Escribir: `--wp N` con `--status`, `--percent`, `--hours`, `--fecha`, `--comment`, `--prioridad`,
   `--asignar`, `--sprint` y `--padre`; `--crear "asunto"` con `--tipo`, `--padre` y `--descripcion`;
   `--editar-horas ID`, `--borrar-horas ID`, `--commit` y `--en-texto`.
