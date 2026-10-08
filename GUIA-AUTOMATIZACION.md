@@ -40,8 +40,9 @@ python gespro.py --commit
 con el hash, el título y el enlace al commit en GitHub, y registra las horas de la línea `Horas:` con la
 fecha de hoy. Si lo ejecutas dos veces, no repite nada.
 
-Un `git commit --amend`, un rebase o un cherry-pick crean un commit nuevo con el mismo mensaje. En esos
-casos el script comenta el commit nuevo, pero no vuelve a registrar sus horas.
+Un `git commit --amend` crea un commit nuevo con el mismo mensaje. El script comenta el commit nuevo,
+pero no vuelve a registrar sus horas. Un rebase (también el de `git pull --rebase`) o un cherry-pick
+copian commits que ya se avisaron, y con ellos el script no hace nada.
 
 ## 2. Hook de Git: que pase solo al hacer commit
 

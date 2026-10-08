@@ -2,6 +2,22 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.3.1, 8 de octubre de 2026
+
+### Corregido
+
+- `--wp` manda todos los cambios de una tarea en un solo `PATCH`. Antes mandaba uno por campo, y si
+  GesPro rechazaba el estado, el sprint ya había cambiado.
+- Si la conexión se corta a mitad de la respuesta o se queda esperando, el script muestra un error en
+  vez de caerse. Con `--en-texto` y `--commit` sigue con las demás tareas.
+- `--commit` no hace nada con los commits de un rebase (también de `git pull --rebase`) ni de un
+  cherry-pick. Antes el hook dejaba un comentario nuevo por cada commit reaplicado.
+- `Tu token no ve el proyecto` sale solo cuando GesPro responde 403 o 404. Si el token venció (401) o
+  no hay internet, se muestra ese error.
+- `gespro.env` se lee aunque tenga BOM, que agregan PowerShell 5.1 y el Bloc de notas antiguo, o
+  espacios alrededor del `=`.
+- `--check` prueba estos casos sin conectarse a GesPro.
+
 ## 1.3.0, 4 de octubre de 2026
 
 ### Agregado

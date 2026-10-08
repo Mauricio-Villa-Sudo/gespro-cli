@@ -30,12 +30,14 @@ import argparse
 import base64
 import contextlib
 import datetime
+import http.client
 import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -59,10 +61,12 @@ def read_setting(name):
     if value:
         return value
     try:
-        with open(CONFIG_FILE, encoding="utf-8") as handle:
+        # utf-8-sig: el Bloc de notas y PowerShell suelen guardar el archivo con BOM.
+        with open(CONFIG_FILE, encoding="utf-8-sig") as handle:
             for line in handle:
-                if line.strip().startswith(f"{name}="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == name:
+                    return value.strip().strip('"').strip("'")
     except FileNotFoundError:
         pass
     return ""
@@ -169,8 +173,9 @@ def request(method, path, token, payload=None):
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:400]
         raise RuntimeError(f"{method} {path} -> HTTP {error.code}: {detail}") from None
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"{method} {path} -> sin conexion: {error.reason}") from None
+    except (OSError, http.client.HTTPException) as error:
+        # OSError incluye URLError, los timeouts y la conexion que se corta a mitad de la respuesta.
+        raise RuntimeError(f"{method} {path} -> sin conexion: {getattr(error, 'reason', None) or error}") from None
 
 
 def with_filters(path, filters, **extra):
@@ -192,7 +197,10 @@ def find_project(token, wanted):
         # Esta instancia no acepta el filtro "identifier" sobre /projects, pero si la ruta directa.
         try:
             return request("GET", f"/api/v3/projects/{urllib.parse.quote(wanted, safe='')}", token)
-        except RuntimeError:
+        except RuntimeError as error:
+            # Solo un 403 o un 404 dicen eso. Un 401 o la falta de red se muestran tal cual.
+            if not re.search(r"-> HTTP 40[34]:", str(error)):
+                raise
             raise RuntimeError(f'Tu token no ve el proyecto "{wanted}". Revisa el nombre con --proyectos.') from None
     projects = visible_projects(token)
     if len(projects) == 1:
@@ -256,10 +264,6 @@ def patch_work_package(token, work_package, **fields):
     """PATCH con el lockVersion que OpenProject exige para no pisar cambios de otra persona."""
     payload = {"lockVersion": work_package["lockVersion"], **fields}
     return request("PATCH", f"/api/v3/work_packages/{work_package['id']}", token, payload)
-
-
-def link_field(token, work_package, field, href):
-    return patch_work_package(token, work_package, _links={field: {"href": href}})
 
 
 def log_time(token, work_package, minutes, spent_on, comment):
@@ -399,22 +403,27 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
             print(f"  (simulacion) registraria {hours} h el {spent_on}")
         return 0
 
+    links = {}
     if sprint:
-        work_package = link_field(token, work_package, "version", f"/api/v3/versions/{version_id}")
-        print(f"  sprint: {sprint}")
+        links["version"] = {"href": f"/api/v3/versions/{version_id}"}
     if status:
-        work_package = link_field(token, work_package, "status", f"/api/v3/statuses/{status_id}")
-        print(f"  estado: {status}")
-    if percent is not None:
-        work_package = patch_work_package(token, work_package, percentageDone=percent)
-        print(f"  progreso: {work_package['percentageDone']}%")
+        links["status"] = {"href": f"/api/v3/statuses/{status_id}"}
     if priority:
-        work_package = link_field(token, work_package, "priority", f"/api/v3/priorities/{priority_id}")
-        print(f"  prioridad: {priority}")
+        links["priority"] = {"href": f"/api/v3/priorities/{priority_id}"}
     if new_assignee:
-        href = new_assignee["_links"]["self"]["href"]
-        work_package = link_field(token, work_package, "assignee", href)
-        print(f"  asignada a: {new_assignee['name']}")
+        links["assignee"] = {"href": new_assignee["_links"]["self"]["href"]}
+    fields = {"_links": links} if links else {}
+    if percent is not None:
+        fields["percentageDone"] = percent
+    # Un solo PATCH: si GesPro rechaza un campo (un estado que tu rol no puede usar), no cambia ninguno.
+    if fields:
+        work_package = patch_work_package(token, work_package, **fields)
+        for label, value in (("sprint", sprint), ("estado", status), ("prioridad", priority),
+                             ("asignada a", new_assignee and new_assignee["name"])):
+            if value:
+                print(f"  {label}: {value}")
+        if percent is not None:
+            print(f"  progreso: {work_package['percentageDone']}%")
     if hours:
         log_time(token, work_package, round(hours * 60), spent_on, time_comment or comment)
         print(f"  horas registradas: {hours} el {spent_on}")
@@ -476,6 +485,10 @@ def from_last_commit(wanted, hours=None, comment=None, **changes):
         raise RuntimeError("No encuentro el ultimo commit: ejecuta esto dentro de un repositorio de Git con commits.") from None
     remote = git("remote", "get-url", "origin", check=False)
     action = git("reflog", "-1", "--format=%gs", check=False).split(":")[0]
+    # Un rebase (tambien el de "pull --rebase") o un cherry-pick copian commits que ya se avisaron.
+    if "rebase" in action or action.startswith("cherry-pick"):
+        print(f"El commit viene de un {action}; se aviso cuando se hizo. No hago nada.")
+        return 0
     short = full_hash[:7]
     subject = message.splitlines()[0] if message else short
     url = github_commit_url(remote, full_hash)
@@ -495,6 +508,66 @@ def require_token():
             f"y guardalo como GESPRO_API_KEY=... en {CONFIG_FILE}"
         )
     return token
+
+
+def error_of(call, *args):
+    """El mensaje del RuntimeError que lanza la llamada; falla si no lanza ninguno."""
+    try:
+        call(*args)
+    except RuntimeError as error:
+        return str(error)
+    raise AssertionError(f"{call.__name__} no fallo")
+
+
+def check_api_flows():
+    """Los flujos que hablan con GesPro y con Git, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    here = sys.modules[__name__]
+    work_package = {"id": 620, "lockVersion": 3, "subject": "Carrito",
+                    "_links": {"project": {"href": "/api/v3/projects/7"}, "priority": {"title": "Normal"}}}
+    pages = {
+        "/api/v3/projects/demo": {"id": 7},
+        "/api/v3/work_packages/620": work_package,
+        "/api/v3/statuses": {"_embedded": {"elements": [{"id": 2, "name": "In progress"}]}},
+        "/api/v3/projects/7/versions": {"_embedded": {"elements": [{"id": 5, "name": "Sprint 2"}]}},
+    }
+    patches = []
+
+    def fake_request(method, path, token, payload=None):
+        if method == "PATCH":
+            patches.append(payload)
+            return {**work_package, "percentageDone": payload.get("percentageDone")}
+        return pages[path]
+
+    # Todos los campos van en un PATCH, para que la tarea no quede a medio cambiar.
+    with mock.patch.multiple(here, request=fake_request, require_token=lambda: "x"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        update_work_package("demo", 620, sprint="Sprint 2", status="In progress", percent=50)
+    assert len(patches) == 1 and patches[0]["percentageDone"] == 50
+    assert set(patches[0]["_links"]) == {"version", "status"}
+
+    for code, expected in ((404, "no ve el proyecto"), (403, "no ve el proyecto"), (401, "HTTP 401")):
+        failure = RuntimeError(f"GET /api/v3/projects/demo -> HTTP {code}: ...")
+        with mock.patch.object(here, "request", side_effect=failure):
+            assert expected in error_of(find_project, "x", "demo")
+
+    cut = mock.Mock(**{"open.side_effect": http.client.RemoteDisconnected("conexion cortada")})
+    with mock.patch.object(here, "_OPENER", cut):
+        assert "sin conexion" in error_of(request, "GET", "/api/v3/users/me", "x")
+
+    outputs = {"log": "feat: x OP#533", "rev-parse": "abc1234def", "reflog": "pull --rebase (pick): feat: x"}
+    with mock.patch.multiple(here, git=lambda *args, check=True: outputs.get(args[0], ""),
+                             update_references=mock.Mock(side_effect=AssertionError("aviso un rebase"))), \
+            contextlib.redirect_stdout(io.StringIO()):
+        assert from_last_commit("demo") == 0
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "gespro.env")
+        with open(path, "w", encoding="utf-8-sig") as handle:
+            handle.write("GESPRO_CHECK = abc\n")
+        with mock.patch.object(here, "CONFIG_FILE", path):
+            assert read_setting("GESPRO_CHECK") == "abc"
 
 
 def self_check():
@@ -550,6 +623,7 @@ def self_check():
     assert github_commit_url("https://github.com/ana/repo", "abc") == "https://github.com/ana/repo/commit/abc"
     assert github_commit_url("https://ana:token123@github.com/ana/repo.git", "abc") is None
     assert github_commit_url("https://gitlab.com/ana/repo.git", "abc") is None
+    check_api_flows()
     print("autotest: todo bien")
     return 0
 
