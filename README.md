@@ -64,8 +64,8 @@ python gespro.py --mis-horas --desde 2026-09-28
 ```
 
 `--mis-tareas` muestra el número, el estado, el porcentaje y las horas de cada tarea asignada a ti.
-`--mis-horas` muestra las horas que ya registraste. Revísalo antes de cargar horas de días
-anteriores, para no registrarlas dos veces.
+`--mis-horas` muestra las horas que ya registraste, cada registro con su `id`. Revísalo antes de
+cargar horas de días anteriores, para no registrarlas dos veces.
 
 ### Actualizar una tarea
 
@@ -79,9 +79,11 @@ python gespro.py --wp 620 --hours 1,5 --fecha 2026-09-29
 python gespro.py --wp 620 --sprint "Sprint 2"
 python gespro.py --wp 620 --prioridad High
 python gespro.py --wp 620 --asignar tomas
+python gespro.py --wp 620 --padre 533
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
+- `--padre` deja la tarea dentro de otra, por ejemplo dentro de su historia.
 - Sin `--fecha`, las horas quedan con la fecha de hoy. No acepta fechas futuras.
 - `--comment` queda como comentario en la tarea y también acompaña a las horas.
 - Agrega `--dry-run` para ver lo que haría sin escribir nada. Úsalo la primera vez.
@@ -96,6 +98,33 @@ muestra los nombres. Para ver los miembros:
 ```
 python gespro.py --miembros
 ```
+
+### Crear una tarea
+
+```
+python gespro.py --crear "Carrito: quitar ítems" --padre 533 --asignar tomas --dry-run
+python gespro.py --crear "Pago con tarjeta" --tipo "User story" --padre 510 --sprint "Sprint 2"
+```
+
+Sin `--tipo`, crea una `Task`. También acepta `--descripcion` y las opciones de `--wp` que no son
+horas ni comentarios: `--sprint`, `--status`, `--percent`, `--prioridad` y `--asignar`.
+
+Antes de crearla, busca una tarea con el mismo asunto y la misma persona asignada. Si la encuentra,
+no crea otra y te da su número. Con otra persona asignada sí la crea, porque tareas como «Planning,
+dailies, review y retrospectiva» van una vez por integrante.
+
+### Corregir horas
+
+```
+python gespro.py --mis-horas
+python gespro.py --editar-horas 372 --hours 1,5 --dry-run
+python gespro.py --editar-horas 372 --fecha 2026-09-29 --comment "Revisión del PR 7"
+python gespro.py --borrar-horas 372 --dry-run
+```
+
+El número es el `id` que muestra `--mis-horas`. `--editar-horas` cambia las horas, la fecha o el
+comentario, y `--borrar-horas` borra el registro. Los dos tocan solo registros tuyos y de tu
+proyecto. Un registro borrado no se recupera, así que primero usa `--dry-run` para ver cuál es.
 
 ### Desde un commit o un PR
 
@@ -146,6 +175,8 @@ Lista las tareas de cada persona del proyecto con su estado y el total de horas.
 | `HTTP 409` | Alguien cambió la tarea mientras tanto | Vuelve a ejecutar el comando |
 | `no es de tu proyecto` | El número de tarea es de otro proyecto | Revisa el número en GesPro |
 | `coincide con varios` | El texto de `--asignar` calza con más de un miembro | Escribe más del nombre o el apellido |
+| `Ya existe #N` | Hay una tarea con ese asunto y esa persona asignada | Cámbiala con `--wp N` |
+| `Solo cambio los tuyos` | El registro de horas es de otra persona | Revisa el `id` en `--mis-horas` |
 
 ## Cómo funciona
 

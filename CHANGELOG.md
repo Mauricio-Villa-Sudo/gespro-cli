@@ -2,6 +2,17 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.4.0, 8 de octubre de 2026
+
+### Agregado
+
+- `--crear`: crea una tarea con `--tipo`, `--padre`, `--descripcion` y las opciones de `--wp` que no son
+  horas ni comentarios. Si ya hay una con el mismo asunto y la misma persona asignada, no crea otra.
+- `--padre` en `--wp`: deja una tarea dentro de otra, por ejemplo dentro de su historia.
+- `--editar-horas` y `--borrar-horas`: corrigen o borran un registro tuyo de `--mis-horas`. Los de
+  otra persona no se tocan.
+- `--mis-horas` muestra el `id` de cada registro.
+
 ## 1.3.1, 8 de octubre de 2026
 
 ### Corregido

@@ -8,14 +8,15 @@ Comandos que puedes usar:
 
 - Leer: `--mis-tareas`, `--mis-horas --desde AAAA-MM-DD`, `--report`, `--miembros`.
 - Escribir: `--wp N` con `--status`, `--percent`, `--hours`, `--fecha`, `--comment`, `--prioridad`,
-  `--asignar` y `--sprint`; `--commit` y `--en-texto`.
+  `--asignar`, `--sprint` y `--padre`; `--crear "asunto"` con `--tipo`, `--padre` y `--descripcion`;
+  `--editar-horas ID`, `--borrar-horas ID`, `--commit` y `--en-texto`.
 
 Reglas:
 
 1. Antes de escribir en GesPro, ejecuta el mismo comando con `--dry-run` y muéstrame qué cambiaría.
 2. Las horas las pongo yo. Si te pido estimarlas, dime de dónde salen (commits, archivos, mi
    actividad del día) y espera mi visto bueno antes de registrarlas. Revisa `--mis-horas` para no
-   duplicar.
+   duplicar. Corregir o borrar horas con `--editar-horas` o `--borrar-horas` también lo decido yo.
 3. Al tomar una tarea: pásala a `In progress`, súbele el porcentaje según lo que realmente está hecho
    y deja un comentario con lo que vas a hacer. Al terminarla, otro comentario con lo que quedó y el
    enlace al PR o al commit.
