@@ -84,10 +84,11 @@ def percent_arg(value):
 
 
 def hours_arg(value):
-    # Una hora negativa generaria duraciones como "PT-1H" que la API acepta igual.
+    # Una hora negativa generaria duraciones como "PT-1H" que la API acepta igual, y menos de un
+    # minuto se redondearia a un registro de 0 minutos.
     number = float(value.replace(",", "."))
-    if not 0 < number <= 24:
-        raise argparse.ArgumentTypeError("tiene que ser mayor que 0 y como maximo 24")
+    if not 0 < number <= 24 or round(number * 60) < 1:
+        raise argparse.ArgumentTypeError("tiene que ser de al menos un minuto (0,02) y como maximo 24")
     return number
 
 
@@ -403,6 +404,10 @@ def delete_hours(wanted, entry_id, dry_run=False):
     if dry_run:
         print("  (simulacion) borraria este registro")
         return 0
+    # En la terminal pide confirmacion: un numero mal escrito borraria otro registro tuyo.
+    if sys.stdin.isatty() and plain(input("  Escribe si para borrarlo: ")) != "si":
+        print("  No borre nada.")
+        return 0
     request("DELETE", f"/api/v3/time_entries/{entry_id}", token)
     print("  registro borrado")
     return 0
@@ -523,7 +528,8 @@ def same_task(token, project_id, subject, assignee_link):
 
 
 def create_work_package(wanted, subject, kind=None, description=None, percent=None, dry_run=False, **names):
-    """Crea una tarea. Si ya hay una con el mismo asunto y la misma persona asignada, no crea otra."""
+    """Crea una tarea, asignada a ti si no dices a quien. Si ya hay una con el mismo asunto y la misma
+    persona asignada, no crea otra."""
     subject = (subject or "").strip()
     if not subject:
         raise RuntimeError("La tarea necesita un asunto.")
@@ -532,7 +538,11 @@ def create_work_package(wanted, subject, kind=None, description=None, percent=No
     project_id = find_project(token, wanted)["id"]
     type_id = find_by_name(token, f"/api/v3/projects/{project_id}/types", kind, "el tipo")
     links, shown = resolve_links(token, project_id, **names)
-    twin = same_task(token, project_id, subject, links.get("assignee"))
+    if "assignee" not in links:
+        user = me(token)
+        links["assignee"] = {"href": user["_links"]["self"]["href"]}
+        shown["asignada a"] = user["name"]
+    twin = same_task(token, project_id, subject, links["assignee"])
     if twin:
         print(f"Ya existe #{twin['id']}: {twin['subject']}. No creo otra; cambiala con --wp {twin['id']}.")
         return 0
@@ -709,7 +719,8 @@ def check_new_commands():
         "/api/v3/work_packages/533": {"id": 533, "subject": "Carrito", "_links": {"project": {"href": "/api/v3/projects/7"}}},
         "/api/v3/principals": {"_embedded": {"elements": [person(8, "TOMÁS PÉREZ SOTO"), person(9, "CAMILA DÍAZ")]}},
         "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [
-            {"id": 600, "subject": "Planning", "_links": {"assignee": {"href": "/api/v3/users/9"}}}]}},
+            {"id": 600, "subject": "Planning", "_links": {"assignee": {"href": "/api/v3/users/9"}}},
+            {"id": 601, "subject": "Login", "_links": {"assignee": {"href": "/api/v3/users/43"}}}]}},
         "/api/v3/time_entries/372": entry(43),
         "/api/v3/time_entries/373": entry(44),
         "/api/v3/time_entries/374": entry(43, project_id=8),
@@ -722,18 +733,30 @@ def check_new_commands():
         writes.append((method, path, payload))
         return {**entry(43), **(payload or {}), "subject": (payload or {}).get("subject")}
 
+    terminal = mock.Mock(**{"isatty.return_value": False})
     with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            contextlib.redirect_stdout(io.StringIO()):
-        # El mismo asunto con otra persona es otra tarea; con la misma persona, ya existe.
+            mock.patch.object(sys, "stdin", terminal), contextlib.redirect_stdout(io.StringIO()):
+        # El mismo asunto con otra persona es otra tarea; con la misma persona, ya existe. Sin --asignar es tuya.
         create_work_package("demo", "planning", parent=533, assignee_text="tomas")
         create_work_package("demo", "Planning", assignee_text="camila")
-        assert [(m, p) for m, p, _ in writes] == [("POST", "/api/v3/projects/7/work_packages")]
+        create_work_package("demo", "login")
+        create_work_package("demo", "Logout")
+        assert [(m, p) for m, p, _ in writes] == [("POST", "/api/v3/projects/7/work_packages")] * 2
         assert set(writes[0][2]["_links"]) == {"type", "parent", "assignee"}
+        assert writes[1][2]["_links"]["assignee"] == {"href": "/api/v3/users/43"}
         writes.clear()
         edit_hours("demo", 372, hours=1.5, day="2026-09-28")
         delete_hours("demo", 372)
         assert writes == [("PATCH", "/api/v3/time_entries/372", {"hours": "PT1H30M", "spentOn": "2026-09-28"}),
                           ("DELETE", "/api/v3/time_entries/372", None)]
+        writes.clear()
+        # En una terminal solo borra si la respuesta es si.
+        terminal.isatty.return_value = True
+        with mock.patch("builtins.input", side_effect=["no", "Sí"]):
+            delete_hours("demo", 372)
+            delete_hours("demo", 372)
+        terminal.isatty.return_value = False
+        assert writes == [("DELETE", "/api/v3/time_entries/372", None)]
         writes.clear()
         assert "Solo cambio los tuyos" in error_of(edit_hours, "demo", 373, 1.0)
         assert "Solo cambio los tuyos" in error_of(delete_hours, "demo", 373)
@@ -758,6 +781,7 @@ def self_check():
         (hours_arg, "0"),
         (hours_arg, "-2"),
         (hours_arg, "25"),
+        (hours_arg, "0,005"),
         (date_arg, "29-09-2026"),
         (date_arg, (datetime.date.today() + datetime.timedelta(days=1)).isoformat()),
     ):

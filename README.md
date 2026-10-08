@@ -106,8 +106,9 @@ python gespro.py --crear "Carrito: quitar ítems" --padre 533 --asignar tomas --
 python gespro.py --crear "Pago con tarjeta" --tipo "User story" --padre 510 --sprint "Sprint 2"
 ```
 
-Sin `--tipo`, crea una `Task`. También acepta `--descripcion` y las opciones de `--wp` que no son
-horas ni comentarios: `--sprint`, `--status`, `--percent`, `--prioridad` y `--asignar`.
+Sin `--tipo`, crea una `Task`, y sin `--asignar` queda asignada a ti. También acepta `--descripcion`
+y las opciones de `--wp` que no son horas ni comentarios: `--sprint`, `--status`, `--percent`,
+`--prioridad` y `--asignar`.
 
 Antes de crearla, busca una tarea con el mismo asunto y la misma persona asignada. Si la encuentra,
 no crea otra y te da su número. Con otra persona asignada sí la crea, porque tareas como «Planning,
@@ -124,7 +125,8 @@ python gespro.py --borrar-horas 372 --dry-run
 
 El número es el `id` que muestra `--mis-horas`. `--editar-horas` cambia las horas, la fecha o el
 comentario, y `--borrar-horas` borra el registro. Los dos tocan solo registros tuyos y de tu
-proyecto. Un registro borrado no se recupera, así que primero usa `--dry-run` para ver cuál es.
+proyecto. Un registro borrado no se recupera, así que primero usa `--dry-run` para ver cuál es. En la
+terminal, `--borrar-horas` además te pide escribir `si` antes de borrar.
 
 ### Desde un commit o un PR
 
