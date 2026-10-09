@@ -2,6 +2,25 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.5.0, 9 de octubre de 2026
+
+### Agregado
+
+- `--estimado`, `--inicio` y `--fin` en `--wp` y `--crear`: horas estimadas y fechas de la tarea. Las
+  fechas pueden ser futuras.
+- `--buscar`: las tareas con un texto en el asunto, sin importar mayúsculas ni tildes.
+- `--ver`: todo lo de una tarea, con las tareas que tiene dentro, los PR enlazados y los últimos
+  comentarios.
+
+### Corregido
+
+- Repetir `--puntos` borraba las notas escritas entre la tabla y la frase del redondeo. Ahora cambia
+  solo las filas de la tabla y el redondeo.
+- Una historia con el encabezado de puntos pero sin tabla, porque no tenía tareas, recibía un segundo
+  bloque al final. Ahora la tabla queda bajo ese encabezado.
+- `--crear` comparaba el asunto con tildes y podía duplicar «Página integradora» si escribías
+  «pagina integradora».
+
 ## 1.4.0, 8 de octubre de 2026
 
 ### Agregado
