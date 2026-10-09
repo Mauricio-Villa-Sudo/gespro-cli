@@ -64,8 +64,8 @@ python gespro.py --mis-horas --desde 2026-09-28
 ```
 
 `--mis-tareas` muestra el número, el estado, el porcentaje y las horas de cada tarea asignada a ti.
-`--mis-horas` muestra las horas que ya registraste. Revísalo antes de cargar horas de días
-anteriores, para no registrarlas dos veces.
+`--mis-horas` muestra las horas que ya registraste, cada registro con su `id`. Revísalo antes de
+cargar horas de días anteriores, para no registrarlas dos veces.
 
 ### Actualizar una tarea
 
@@ -79,9 +79,11 @@ python gespro.py --wp 620 --hours 1,5 --fecha 2026-09-29
 python gespro.py --wp 620 --sprint "Sprint 2"
 python gespro.py --wp 620 --prioridad High
 python gespro.py --wp 620 --asignar tomas
+python gespro.py --wp 620 --padre 533
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
+- `--padre` deja la tarea dentro de otra, por ejemplo dentro de su historia.
 - Sin `--fecha`, las horas quedan con la fecha de hoy. No acepta fechas futuras.
 - `--comment` queda como comentario en la tarea y también acompaña a las horas.
 - Agrega `--dry-run` para ver lo que haría sin escribir nada. Úsalo la primera vez.
@@ -96,6 +98,56 @@ muestra los nombres. Para ver los miembros:
 ```
 python gespro.py --miembros
 ```
+
+### Crear una tarea
+
+```
+python gespro.py --crear "Carrito: quitar ítems" --padre 533 --asignar tomas --dry-run
+python gespro.py --crear "Pago con tarjeta" --tipo "User story" --padre 510 --sprint "Sprint 2"
+```
+
+Sin `--tipo`, crea una `Task`, y sin `--asignar` queda asignada a ti. También acepta `--descripcion`
+y las opciones de `--wp` que no son horas ni comentarios: `--sprint`, `--status`, `--percent`,
+`--prioridad` y `--asignar`.
+
+Antes de crearla, busca una tarea con el mismo asunto y la misma persona asignada. Si la encuentra,
+no crea otra y te da su número. Con otra persona asignada sí la crea, porque tareas como «Planning,
+dailies, review y retrospectiva» van una vez por integrante.
+
+### Repartir los puntos de una historia
+
+```
+python gespro.py --puntos 533 --dry-run
+python gespro.py --puntos 533 --total 8 --peso 540=6 --peso 541=4
+```
+
+`--puntos` toma una User story y reparte sus puntos de historia entre sus tareas según las horas
+estimadas de cada una. En la descripción de la historia deja una tabla con los puntos de cada tarea y
+el porcentaje de la historia que abarca. Los puntos van en pasos de medio punto, o de un cuarto cuando
+con medios no sale un reparto parejo. Mientras los puntos alcancen, dos tareas con las mismas horas
+reciben lo mismo y una con más horas nunca recibe menos.
+
+Si la historia no tiene puntos, dáselos con `--total`, que también sirve para cambiarlos. Si una tarea
+no tiene horas estimadas, ponlas en GesPro (campo Trabajo) o usa `--peso ID=HORAS`, que además sirve
+para una tarea que pesa más o menos de lo que dicen sus horas. Si la historia ya tenía la tabla, la
+reemplaza y deja el resto de la descripción como estaba.
+
+GesPro tiene el campo de puntos solo en las User story, así que los puntos de cada tarea quedan en esa
+tabla.
+
+### Corregir horas
+
+```
+python gespro.py --mis-horas
+python gespro.py --editar-horas 372 --hours 1,5 --dry-run
+python gespro.py --editar-horas 372 --fecha 2026-09-29 --comment "Revisión del PR 7"
+python gespro.py --borrar-horas 372 --dry-run
+```
+
+El número es el `id` que muestra `--mis-horas`. `--editar-horas` cambia las horas, la fecha o el
+comentario, y `--borrar-horas` borra el registro. Los dos tocan solo registros tuyos y de tu
+proyecto. Un registro borrado no se recupera, así que primero usa `--dry-run` para ver cuál es. En la
+terminal, `--borrar-horas` además te pide escribir `si` antes de borrar.
 
 ### Desde un commit o un PR
 
@@ -120,9 +172,20 @@ Para que esto pase solo con un hook de Git, con GitHub Actions o con un asistent
 
 ```
 python gespro.py --report
+python gespro.py --sprint-actual
+python gespro.py --horas-equipo
+python gespro.py --horas-equipo --desde 2026-09-28
 ```
 
-Lista las tareas de cada persona del proyecto con su estado y el total de horas. No escribe nada.
+Ninguno escribe nada.
+
+- `--report` lista las tareas de cada persona del proyecto con su estado y el total de horas.
+- `--sprint-actual` muestra el sprint en curso y cuántos días le quedan, las tareas abiertas y
+  cerradas de cada persona, tus tareas abiertas y las que siguen abiertas en sprints que ya
+  terminaron. Si hoy cae entre dos sprints, muestra el próximo.
+- `--horas-equipo` suma las horas de cada integrante desde el lunes, o desde `--desde`, y dice quién no
+  ha registrado. Solo cuenta a quienes tienen rol Developer, así que el docente y el ayudante no
+  salen en esa lista.
 
 ## 3. Buenas prácticas
 
@@ -146,6 +209,8 @@ Lista las tareas de cada persona del proyecto con su estado y el total de horas.
 | `HTTP 409` | Alguien cambió la tarea mientras tanto | Vuelve a ejecutar el comando |
 | `no es de tu proyecto` | El número de tarea es de otro proyecto | Revisa el número en GesPro |
 | `coincide con varios` | El texto de `--asignar` calza con más de un miembro | Escribe más del nombre o el apellido |
+| `Ya existe #N` | Hay una tarea con ese asunto y esa persona asignada | Cámbiala con `--wp N` |
+| `Solo cambio los tuyos` | El registro de horas es de otra persona | Revisa el `id` en `--mis-horas` |
 
 ## Cómo funciona
 

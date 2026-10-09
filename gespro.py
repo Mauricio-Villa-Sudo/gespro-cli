@@ -12,10 +12,17 @@ Uso:
     python gespro.py --wp 620 --sprint "Sprint 2"         mueve la tarea a un sprint
     python gespro.py --wp 620 --prioridad High            prioridad: Low, Normal, High o Immediate
     python gespro.py --wp 620 --asignar tomas             reasigna la tarea a otro miembro
+    python gespro.py --wp 620 --padre 533                 la deja dentro de otra tarea (su historia)
+    python gespro.py --crear "Carrito: quitar items" --padre 533 --asignar tomas   crea una tarea
+    python gespro.py --editar-horas 372 --hours 1,5       corrige un registro de --mis-horas
+    python gespro.py --borrar-horas 372                   borra un registro tuyo
     python gespro.py --miembros                           miembros del proyecto (para --asignar)
     python gespro.py --commit                             avisa en las tareas OP#numero del ultimo commit
     python gespro.py --en-texto "texto con OP#620" --status "In Review"   aplica a las tareas del texto
     python gespro.py --report                             estado del proyecto por persona
+    python gespro.py --sprint-actual                      el sprint en curso y lo que quedo abierto de los anteriores
+    python gespro.py --horas-equipo [--desde 2026-10-01]  horas de cada integrante (desde el lunes si no hay fecha)
+    python gespro.py --puntos 533 [--total 8] [--peso 540=6]   reparte los puntos de la historia entre sus tareas
     python gespro.py --check                              prueba local, sin red
 
 Las opciones de --wp se pueden combinar en una sola llamada. --dry-run muestra lo que haria sin
@@ -33,6 +40,7 @@ import datetime
 import http.client
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -45,7 +53,7 @@ import urllib.request
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.3"
+USER_AGENT = "gespro-cli/1.4"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -53,6 +61,9 @@ REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
 HOURS_LINE = re.compile(r"^[ \t]*(?:horas|hours)[ \t]*:(.*)$", re.IGNORECASE | re.MULTILINE)
 # Accion del reflog de un commit nuevo. amend, rebase y cherry-pick repiten un mensaje que ya se registro.
 NEW_COMMIT = {"commit", "commit (initial)", "commit (merge)"}
+# La tabla que escribe --puntos va del encabezado a la frase que la cierra. Al repetir, se reemplaza.
+POINTS_HEADER = "**Puntos por tarea**"
+POINTS_BLOCK = re.compile(r"\*\*Puntos por tarea\*\*.*?redondeada a (?:medio punto|un cuarto de punto)\.", re.DOTALL)
 
 
 def read_setting(name):
@@ -80,11 +91,31 @@ def percent_arg(value):
 
 
 def hours_arg(value):
-    # Una hora negativa generaria duraciones como "PT-1H" que la API acepta igual.
+    # Una hora negativa generaria duraciones como "PT-1H" que la API acepta igual, y menos de un
+    # minuto se redondearia a un registro de 0 minutos.
     number = float(value.replace(",", "."))
-    if not 0 < number <= 24:
-        raise argparse.ArgumentTypeError("tiene que ser mayor que 0 y como maximo 24")
+    if not 0 < number <= 24 or round(number * 60) < 1:
+        raise argparse.ArgumentTypeError("tiene que ser de al menos un minuto (0,02) y como maximo 24")
     return number
+
+
+def points_arg(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("tiene que ser un entero mayor que 0")
+    return number
+
+
+def weight_arg(value):
+    """'540=8,5' -> (540, 8.5): las horas con que pesa la tarea 540 en --puntos."""
+    task, separator, hours = value.partition("=")
+    try:
+        pair = (int(task), float(hours.replace(",", ".")))
+    except ValueError:
+        pair = None
+    if not separator or pair is None or not math.isfinite(pair[1]) or pair[1] < 0:
+        raise argparse.ArgumentTypeError("usa ID=HORAS, por ejemplo 540=8,5")
+    return pair
 
 
 def date_arg(value):
@@ -132,18 +163,13 @@ def iso_duration(minutes):
 
 
 def hours_from_iso(duration):
-    """'PT2H30M' -> 2.5. OpenProject devuelve las horas en formato ISO 8601."""
-    if not duration or not duration.startswith("PT"):
+    """'PT2H30M' -> 2.5. OpenProject devuelve las horas en formato ISO 8601, y a veces con semanas y dias
+    de 24 horas: 'P1DT2H' son 26."""
+    match = re.fullmatch(r"P(?:([\d.]+)W)?(?:([\d.]+)D)?(?:T(?:([\d.]+)H)?(?:([\d.]+)M)?(?:([\d.]+)S)?)?", duration or "")
+    if not match:
         return 0.0
-    total, number = 0.0, ""
-    for char in duration[2:]:
-        if char.isdigit() or char == ".":
-            number += char
-            continue
-        value = float(number or 0)
-        total += {"H": value, "M": value / 60, "S": value / 3600}.get(char, 0)
-        number = ""
-    return round(total, 2)
+    weeks, days, hours, minutes, seconds = (float(value or 0) for value in match.groups())
+    return round(weeks * 168 + days * 24 + hours + minutes / 60 + seconds / 3600, 2)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -323,27 +349,95 @@ def my_tasks(wanted):
     return 0
 
 
-def my_hours(wanted, since=None):
-    token = require_token()
-    project_id = find_project(token, wanted)["id"]
-    filters = [
-        {"user_id": {"operator": "=", "values": ["me"]}},
-        {"project_id": {"operator": "=", "values": [str(project_id)]}},
-    ]
+def project_time_entries(token, project_id, since=None, only_mine=False):
+    filters = [{"project_id": {"operator": "=", "values": [str(project_id)]}}]
+    if only_mine:
+        filters.append({"user_id": {"operator": "=", "values": ["me"]}})
     if since:
         filters.append({"spent_on": {"operator": "<>d", "values": [since, datetime.date.today().isoformat()]}})
     path = with_filters("/api/v3/time_entries", filters, pageSize=500, sortBy=json.dumps([["spent_on", "asc"]]))
-    entries = elements(request("GET", path, token))
-    total = 0.0
-    print("  fecha       horas  #tarea  comentario")
+    payload = request("GET", path, token)
+    entries = elements(payload)
+    if payload.get("total", 0) > len(entries):
+        print(f"Aviso: hay {payload['total']} registros y muestro {len(entries)}. Acota con --desde.")
+    return entries
+
+
+def my_hours(wanted, since=None):
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    entries = project_time_entries(token, project_id, since, only_mine=True)
+    print(ENTRY_HEADER)
     for entry in entries:
-        hours = hours_from_iso(entry.get("hours"))
-        total += hours
-        task = (entry["_links"].get("entity") or entry["_links"].get("workPackage") or {})
-        task_id = (task.get("href") or "").rsplit("/", 1)[-1]
-        comment = ((entry.get("comment") or {}).get("raw") or "").replace("\n", " ")
-        print(f"  {entry['spentOn']}  {hours:5.2f}  #{task_id:<5}  {comment[:60]}")
+        print(entry_line(entry))
+    total = sum(hours_from_iso(entry.get("hours")) for entry in entries)
     print(f"\n  Total: {total:.2f} h en {len(entries)} registros")
+    return 0
+
+
+ENTRY_HEADER = "  id     fecha       horas  #tarea  comentario"
+
+
+def entry_line(entry):
+    """Un registro de horas en una linea. El id es el que piden --editar-horas y --borrar-horas."""
+    task = entry["_links"].get("entity") or entry["_links"].get("workPackage") or {}
+    task_id = (task.get("href") or "").rsplit("/", 1)[-1]
+    comment = ((entry.get("comment") or {}).get("raw") or "").replace("\n", " ")
+    hours = hours_from_iso(entry.get("hours"))
+    return f"  {entry['id']:<6} {entry['spentOn']}  {hours:5.2f}  #{task_id:<5}  {comment[:60]}"
+
+
+def own_entry(token, entry_id, project_id):
+    """El registro de horas, si es tuyo y de tu proyecto. Los de otra persona no se tocan."""
+    entry = request("GET", f"/api/v3/time_entries/{entry_id}", token)
+    if entry["_links"]["user"]["href"] != me(token)["_links"]["self"]["href"]:
+        owner = entry["_links"]["user"].get("title") or "otra persona"
+        raise RuntimeError(f"El registro {entry_id} es de {owner}. Solo cambio los tuyos.")
+    if not entry["_links"]["project"]["href"].endswith(f"/projects/{project_id}"):
+        raise RuntimeError(f"El registro {entry_id} no es de tu proyecto. No toco nada.")
+    print(ENTRY_HEADER)
+    print(entry_line(entry))
+    return entry
+
+
+def edit_hours(wanted, entry_id, hours=None, day=None, comment=None, dry_run=False):
+    """Corrige las horas, la fecha o el comentario de un registro tuyo."""
+    shown = {"horas": hours, "fecha": day, "comentario": comment}
+    if not any(shown.values()):
+        raise RuntimeError("Dime que cambiar: --hours, --fecha o --comment.")
+    token = require_token()
+    own_entry(token, entry_id, find_project(token, wanted)["id"])
+    if dry_run:
+        for label, value in shown.items():
+            if value:
+                print(f"  (simulacion) pondria {label}: {value}")
+        return 0
+    # Los registros de horas no tienen lockVersion, a diferencia de las tareas.
+    changes = {}
+    if hours:
+        changes["hours"] = iso_duration(round(hours * 60))
+    if day:
+        changes["spentOn"] = day
+    if comment:
+        changes["comment"] = {"raw": comment}
+    print("Quedo asi:")
+    print(entry_line(request("PATCH", f"/api/v3/time_entries/{entry_id}", token, changes)))
+    return 0
+
+
+def delete_hours(wanted, entry_id, dry_run=False):
+    """Borra un registro de horas tuyo. No se puede deshacer, por eso antes lo muestra."""
+    token = require_token()
+    own_entry(token, entry_id, find_project(token, wanted)["id"])
+    if dry_run:
+        print("  (simulacion) borraria este registro")
+        return 0
+    # En la terminal pide confirmacion: un numero mal escrito borraria otro registro tuyo.
+    if sys.stdin.isatty() and plain(input("  Escribe si para borrarlo: ")) != "si":
+        print("  No borre nada.")
+        return 0
+    request("DELETE", f"/api/v3/time_entries/{entry_id}", token)
+    print("  registro borrado")
     return 0
 
 
@@ -373,63 +467,214 @@ def report(wanted):
     return 0
 
 
-def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None,
-                        priority=None, assignee_text=None, dry_run=False, time_comment=None, tag=None):
+def split_sprints(versions, today):
+    """El sprint en curso (o el proximo, si hoy cae entre dos) y los que ya terminaron.
+    Las versiones sin fechas, como el Product Backlog, no cuentan."""
+    dated = sorted((v for v in versions if v.get("startDate") and v.get("endDate")), key=lambda v: v["startDate"])
+    pending = [v for v in dated if v["endDate"] >= today]
+    return (pending[0] if pending else None), [v for v in dated if v["endDate"] < today]
+
+
+def sprint_status(wanted):
+    """El sprint en curso por persona, tus tareas abiertas y lo que quedo abierto de sprints anteriores."""
     token = require_token()
     project_id = find_project(token, wanted)["id"]
+    today = datetime.date.today().isoformat()
+    current, ended = split_sprints(elements(request("GET", f"/api/v3/projects/{project_id}/versions", token)), today)
+    closed = {s["_links"]["self"]["href"] for s in elements(request("GET", "/api/v3/statuses", token)) if s.get("isClosed")}
+    my_href = me(token)["_links"]["self"]["href"]
+    tasks_path = f"/api/v3/projects/{project_id}/work_packages"
+    if current:
+        start, end = current["startDate"], current["endDate"]
+        left = (datetime.date.fromisoformat(end) - datetime.date.today()).days
+        when = f"empieza el {start}" if start > today else ("termina hoy" if left == 0 else f"termina en {left} dias")
+        print(f"{current['name']}: del {start} al {end}, {when}\n")
+        filters = [{"version": {"operator": "=", "values": [str(current["id"])]}}, {"status": {"operator": "*", "values": []}}]
+        tasks = elements(request("GET", with_filters(tasks_path, filters, pageSize=500), token))
+        counts = {}
+        for item in tasks:
+            who = (item["_links"].get("assignee") or {}).get("title") or "SIN ASIGNAR"
+            is_closed = item["_links"]["status"]["href"] in closed
+            open_count, closed_count = counts.get(who, (0, 0))
+            counts[who] = (open_count + (not is_closed), closed_count + is_closed)
+        print(f"  {'persona':<32} abiertas  cerradas")
+        for who in sorted(counts):
+            print(f"  {who[:32]:<32} {counts[who][0]:>8}  {counts[who][1]:>8}")
+        mine = [i for i in tasks if (i["_links"].get("assignee") or {}).get("href") == my_href
+                and i["_links"]["status"]["href"] not in closed]
+        print(f"\nTus tareas abiertas: {len(mine)}")
+        for item in mine:
+            print(f"  #{item['id']:<5} {item['_links']['status']['title'][:12]:<12} {item.get('percentageDone') or 0:>3}%  {item['subject'][:60]}")
+    else:
+        print("No hay sprints con fechas por delante.")
+    if ended:
+        filters = [{"version": {"operator": "=", "values": [str(v["id"]) for v in ended]}}, {"status": {"operator": "o", "values": []}}]
+        left_over = elements(request("GET", with_filters(tasks_path, filters, pageSize=500), token))
+        print(f"\nSiguen abiertas de sprints que ya terminaron: {len(left_over)}")
+        for item in left_over:
+            who = (item["_links"].get("assignee") or {}).get("title") or "SIN ASIGNAR"
+            print(f"  #{item['id']:<5} {item['_links']['version']['title'][:10]:<10} {item['_links']['status']['title'][:12]:<12} "
+                  f"{who[:22]:<22} {item['subject'][:40]}")
+    return 0
+
+
+def hours_by_person(entries):
+    """Horas y dias con registro de cada persona."""
+    people = {}
+    for entry in entries:
+        who = entry["_links"]["user"].get("title") or "?"
+        total, days = people.get(who, (0.0, frozenset()))
+        people[who] = (total + hours_from_iso(entry.get("hours")), days | {entry["spentOn"]})
+    return people
+
+
+def team_hours(wanted, since=None):
+    """Horas de cada integrante desde una fecha (por defecto, el lunes), y quien no ha registrado."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    today = datetime.date.today()
+    since = since or (today - datetime.timedelta(days=today.weekday())).isoformat()
+    people = hours_by_person(project_time_entries(token, project_id, since))
+    print(f"Horas del {since} al {today.isoformat()}\n")
+    print(f"  {'persona':<32} horas  dias  ultimo dia")
+    for who, (total, days) in sorted(people.items(), key=lambda item: -item[1][0]):
+        print(f"  {who[:32]:<32} {total:5.2f}  {len(days):>4}  {max(days)}")
+    missing = sorted(set(developers(token, project_id)) - set(people))
+    print(f"\n  Sin horas en estas fechas: {', '.join(missing) if missing else 'nadie'}")
+    return 0
+
+
+def developers(token, project_id):
+    """Los miembros con rol Developer, para no contar al docente ni al ayudante. Si el proyecto no usa
+    ese rol, todos los miembros."""
+    path = with_filters("/api/v3/memberships", [{"project": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
+    memberships = elements(request("GET", path, token))
+    names = [m["_links"]["principal"]["title"] for m in memberships
+             if any(role.get("title") == "Developer" for role in m["_links"].get("roles", []))]
+    return names or [m["_links"]["principal"]["title"] for m in memberships]
+
+
+def task_in_project(token, wp_id, project_id):
+    """La tarea, si es del proyecto. Un numero mal tipeado no puede terminar escribiendo en otro proyecto."""
     work_package = request("GET", f"/api/v3/work_packages/{wp_id}", token)
-    # Un numero mal tipeado no puede terminar escribiendo en otro proyecto que el token ve.
     if not work_package["_links"]["project"]["href"].endswith(f"/projects/{project_id}"):
         raise RuntimeError(f"#{wp_id} no es de tu proyecto. No toco nada.")
+    return work_package
+
+
+def resolve_links(token, project_id, sprint=None, status=None, priority=None, assignee_text=None, parent=None):
+    """Los enlaces de la API para los nombres escritos, y como mostrarlos. Busca todo antes de escribir,
+    para que un nombre mal escrito no deje la tarea a medio cambiar."""
+    links, shown = {}, {}
+    if sprint:
+        version_id = find_by_name(token, f"/api/v3/projects/{project_id}/versions", sprint, "el sprint")
+        links["version"] = {"href": f"/api/v3/versions/{version_id}"}
+        shown["sprint"] = sprint
+    if status:
+        status_id = find_by_name(token, "/api/v3/statuses", status, "el estado")
+        links["status"] = {"href": f"/api/v3/statuses/{status_id}"}
+        shown["estado"] = status
+    if priority:
+        priority_id = find_by_name(token, "/api/v3/priorities", priority, "la prioridad")
+        links["priority"] = {"href": f"/api/v3/priorities/{priority_id}"}
+        shown["prioridad"] = priority
+    if assignee_text:
+        member = find_member(project_members(token, project_id), assignee_text)
+        links["assignee"] = {"href": member["_links"]["self"]["href"]}
+        shown["asignada a"] = member["name"]
+    if parent:
+        mother = task_in_project(token, parent, project_id)
+        links["parent"] = {"href": f"/api/v3/work_packages/{parent}"}
+        shown["dentro de"] = f"#{parent} {mother['subject']}"
+    return links, shown
+
+
+def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None,
+                        priority=None, assignee_text=None, parent=None, dry_run=False, time_comment=None, tag=None):
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    work_package = task_in_project(token, wp_id, project_id)
     assignee = (work_package["_links"].get("assignee") or {}).get("title") or "sin asignar"
     print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee}, prioridad {work_package['_links']['priority']['title']})")
     spent_on = day or datetime.date.today().isoformat()
-    # Se busca antes de escribir nada, para que un nombre mal escrito no deje la tarea a medio cambiar.
-    new_assignee = find_member(project_members(token, project_id), assignee_text) if assignee_text else None
-    priority_id = find_by_name(token, "/api/v3/priorities", priority, "la prioridad") if priority else None
-    version_id = find_by_name(token, f"/api/v3/projects/{project_id}/versions", sprint, "el sprint") if sprint else None
-    status_id = find_by_name(token, "/api/v3/statuses", status, "el estado") if status else None
+    links, shown = resolve_links(token, project_id, sprint, status, priority, assignee_text, parent)
+    fields = {"_links": links} if links else {}
+    if percent is not None:
+        fields["percentageDone"] = percent
+        shown["progreso"] = f"{percent}%"
 
     if tag and already_noted(token, wp_id, tag):
         print(f"  ya tiene registrado {tag}; no repito el comentario ni las horas")
         comment, hours = None, None
 
     if dry_run:
-        for label, value in (("sprint", sprint), ("estado", status), ("porcentaje", percent), ("prioridad", priority),
-                             ("asignada a", new_assignee and new_assignee["name"]), ("comentario", comment)):
-            if value is not None:
-                print(f"  (simulacion) pondria {label}: {value}")
+        for label, value in shown.items():
+            print(f"  (simulacion) pondria {label}: {value}")
+        if comment:
+            print(f"  (simulacion) pondria comentario: {comment}")
         if hours:
             print(f"  (simulacion) registraria {hours} h el {spent_on}")
         return 0
 
-    links = {}
-    if sprint:
-        links["version"] = {"href": f"/api/v3/versions/{version_id}"}
-    if status:
-        links["status"] = {"href": f"/api/v3/statuses/{status_id}"}
-    if priority:
-        links["priority"] = {"href": f"/api/v3/priorities/{priority_id}"}
-    if new_assignee:
-        links["assignee"] = {"href": new_assignee["_links"]["self"]["href"]}
-    fields = {"_links": links} if links else {}
-    if percent is not None:
-        fields["percentageDone"] = percent
     # Un solo PATCH: si GesPro rechaza un campo (un estado que tu rol no puede usar), no cambia ninguno.
     if fields:
-        work_package = patch_work_package(token, work_package, **fields)
-        for label, value in (("sprint", sprint), ("estado", status), ("prioridad", priority),
-                             ("asignada a", new_assignee and new_assignee["name"])):
-            if value:
-                print(f"  {label}: {value}")
-        if percent is not None:
-            print(f"  progreso: {work_package['percentageDone']}%")
+        patch_work_package(token, work_package, **fields)
+        for label, value in shown.items():
+            print(f"  {label}: {value}")
     if hours:
         log_time(token, work_package, round(hours * 60), spent_on, time_comment or comment)
         print(f"  horas registradas: {hours} el {spent_on}")
     if comment:
         add_comment(token, wp_id, comment)
         print("  comentario agregado")
+    return 0
+
+
+def same_task(token, project_id, subject, assignee_link):
+    """Una tarea con el mismo asunto y la misma persona asignada. El asunto solo no basta: tareas como
+    "Planning, dailies, review y retrospectiva" existen una vez por integrante."""
+    filters = [{"subject": {"operator": "~", "values": [subject]}}, {"status": {"operator": "*", "values": []}}]
+    path = with_filters(f"/api/v3/projects/{project_id}/work_packages", filters, pageSize=500)
+    wanted_href = (assignee_link or {}).get("href")
+    for item in elements(request("GET", path, token)):
+        if plain(item["subject"]) == plain(subject) and (item["_links"].get("assignee") or {}).get("href") == wanted_href:
+            return item
+    return None
+
+
+def create_work_package(wanted, subject, kind=None, description=None, percent=None, dry_run=False, **names):
+    """Crea una tarea, asignada a ti si no dices a quien. Si ya hay una con el mismo asunto y la misma
+    persona asignada, no crea otra."""
+    subject = (subject or "").strip()
+    if not subject:
+        raise RuntimeError("La tarea necesita un asunto.")
+    kind = kind or "Task"
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    type_id = find_by_name(token, f"/api/v3/projects/{project_id}/types", kind, "el tipo")
+    links, shown = resolve_links(token, project_id, **names)
+    if "assignee" not in links:
+        user = me(token)
+        links["assignee"] = {"href": user["_links"]["self"]["href"]}
+        shown["asignada a"] = user["name"]
+    twin = same_task(token, project_id, subject, links["assignee"])
+    if twin:
+        print(f"Ya existe #{twin['id']}: {twin['subject']}. No creo otra; cambiala con --wp {twin['id']}.")
+        return 0
+    links["type"] = {"href": f"/api/v3/types/{type_id}"}
+    payload = {"subject": subject, "_links": links}
+    if description:
+        payload["description"] = {"raw": description}
+    if percent is not None:
+        payload["percentageDone"] = percent
+        shown["progreso"] = f"{percent}%"
+    if dry_run:
+        print(f"(simulacion) crearia {kind}: {subject}")
+    else:
+        created = request("POST", f"/api/v3/projects/{project_id}/work_packages", token, payload)
+        print(f"#{created['id']} creada: {created['subject']}")
+    for label, value in shown.items():
+        print(f"  {label}: {value}")
     return 0
 
 
@@ -452,6 +697,129 @@ def update_references(wanted, text, hours=None, **changes):
             print(f"#{wp_id}: Error: {error}")
             failed += 1
     return 1 if failed else 0
+
+
+def apportion(units, weights, at_least_one=False, strict=False):
+    """Reparte units enteros segun weights. La suma calza exacto, las tareas con el mismo peso reciben lo
+    mismo y una con mas peso nunca recibe menos que otra con menos. Si no hay un reparto asi, con strict
+    devuelve None y sin strict desempata por resto mayor."""
+    total = sum(weights)
+    if total <= 0:
+        return [0] * len(weights)
+    raw = [units * w / total for w in weights]
+    got = [max(1, int(r)) if at_least_one and w > 0 else int(r) for r, w in zip(raw, weights)]
+    while sum(got) > units:
+        k = max((k for k in range(len(got)) if got[k] > 1), key=lambda k: got[k] - raw[k])
+        got[k] -= 1
+    left = units - sum(got)
+    groups = sorted({w: [k for k, other in enumerate(weights) if other == w] for w in weights if w > 0}.items())
+    best, best_error = None, None
+    # Prueba todas las combinaciones de grupos de igual peso; alcanza para unos 15 pesos distintos.
+    for mask in range(1 << len(groups)):
+        chosen = [k for i, (_, ks) in enumerate(groups) if mask >> i & 1 for k in ks]
+        if len(chosen) != left:
+            continue
+        trial = [g + (k in chosen) for k, g in enumerate(got)]
+        values = [trial[ks[0]] for _, ks in groups]
+        if any(trial[k] != trial[ks[0]] for _, ks in groups for k in ks) or any(a > b for a, b in zip(values, values[1:])):
+            continue
+        error = sum((t - r) ** 2 for t, r in zip(trial, raw))
+        if best_error is None or error < best_error:
+            best, best_error = trial, error
+    if best is not None or strict:
+        return best
+    while sum(got) < units:
+        k = max((k for k in range(len(got)) if weights[k] > 0), key=lambda k: raw[k] - got[k])
+        got[k] += 1
+    return got
+
+
+def split_points(points, weights):
+    """Puntos por tarea en pasos de 0,5, o de 0,25 si con medios puntos no sale un reparto parejo.
+    Cada tarea con peso recibe al menos un paso. Devuelve los puntos y el paso."""
+    positive = sum(1 for w in weights if w > 0)
+    for step in (0.5, 0.25):
+        units = round(points / step)
+        if positive <= units:
+            got = apportion(units, weights, at_least_one=True, strict=True)
+            if got is not None:
+                return [u * step for u in got], step
+    if positive > points * 4:
+        raise RuntimeError(f"{positive} tareas no caben en {points} puntos: cada una necesita al menos un cuarto. "
+                           "Sube --total o deja fuera alguna con --peso ID=0.")
+    return [u * 0.25 for u in apportion(round(points / 0.25), weights, at_least_one=True)], 0.25
+
+
+def points_text(value):
+    return f"{value:g}".replace(".", ",")
+
+
+def points_block(tasks, parts, shares, step):
+    rounding = "medio punto" if step == 0.5 else "un cuarto de punto"
+    lines = [POINTS_HEADER, "", "| Tarea | Puntos | Abarca |", "|---|---:|---:|"]
+    for task, part, share in zip(tasks, parts, shares):
+        lines.append(f"| #{task['id']} {task['subject'].replace('|', '/')} | {points_text(part)} | {share}% |")
+    lines += [f"| **Total** | **{points_text(sum(parts))}** | **100%** |", "",
+              f"Cada tarea recibe la parte que le toca segun sus horas estimadas (columna Abarca), redondeada a {rounding}."]
+    return "\n".join(lines)
+
+
+def with_points_block(description, block):
+    """La descripcion con la tabla nueva en el lugar de la anterior, o al final si no tenia."""
+    if POINTS_BLOCK.search(description):
+        return POINTS_BLOCK.sub(lambda _: block, description, count=1)
+    return f"{description.rstrip()}\n\n{block}" if description.strip() else block
+
+
+def story_tasks(token, project_id, story_id):
+    filters = [{"parent": {"operator": "=", "values": [str(story_id)]}}, {"status": {"operator": "*", "values": []}}]
+    path = with_filters(f"/api/v3/projects/{project_id}/work_packages", filters, pageSize=500)
+    return sorted(elements(request("GET", path, token)), key=lambda task: task["id"])
+
+
+def task_weights(story_id, tasks, weights):
+    """Las horas de cada tarea: las de --peso o, si no, las estimadas en GesPro."""
+    weights = dict(weights or [])
+    unknown = sorted(set(weights) - {task["id"] for task in tasks})
+    if unknown:
+        listed = ", ".join(f"#{i}" for i in unknown)
+        raise RuntimeError(f"--peso habla de tareas que no estan dentro de #{story_id}: {listed}.")
+    hours = [weights.get(task["id"], hours_from_iso(task.get("estimatedTime"))) for task in tasks]
+    missing = [task["id"] for task, h in zip(tasks, hours) if not h and task["id"] not in weights]
+    if missing:
+        listed = ", ".join(f"#{i}" for i in missing)
+        raise RuntimeError(f"Sin horas estimadas: {listed}. Ponlas en GesPro (campo Trabajo) o usa --peso {missing[0]}=3.")
+    if not sum(hours):
+        raise RuntimeError("Todas las tareas pesan 0; asi no hay como repartir.")
+    return hours
+
+
+def story_points(wanted, story_id, total=None, weights=None, dry_run=False):
+    """Reparte los puntos de una historia entre sus tareas segun sus horas y deja la tabla en la
+    descripcion de la historia. Si ya tenia una tabla de --puntos, la reemplaza."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    story = task_in_project(token, story_id, project_id)
+    if "storyPoints" not in story:
+        kind = story["_links"]["type"]["title"]
+        raise RuntimeError(f"#{story_id} es de tipo {kind}; solo las User story tienen puntos de historia.")
+    points = total or story.get("storyPoints")
+    if not points:
+        raise RuntimeError(f"#{story_id} no tiene puntos de historia. Daselos con --total, por ejemplo --total 5.")
+    tasks = story_tasks(token, project_id, story_id)
+    if not tasks:
+        raise RuntimeError(f"#{story_id} no tiene tareas. Mete una con --wp ID --padre {story_id}.")
+    hours = task_weights(story_id, tasks, weights)
+    parts, step = split_points(points, hours)
+    block = points_block(tasks, parts, apportion(100, hours), step)
+    print(f"#{story_id}: {story['subject']} ({points} puntos)\n\n{block}\n")
+    if dry_run:
+        print("(simulacion) no escribo nada")
+        return 0
+    description = (story.get("description") or {}).get("raw") or ""
+    patch_work_package(token, story, storyPoints=points, description={"raw": with_points_block(description, block)})
+    print(f"#{story_id} queda con {points} puntos y la tabla en su descripcion.")
+    return 0
 
 
 def git(*args, check=True):
@@ -570,10 +938,194 @@ def check_api_flows():
             assert read_setting("GESPRO_CHECK") == "abc"
 
 
+def check_new_commands():
+    """--crear, --editar-horas y --borrar-horas, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    def person(user_id, name):
+        return {"id": user_id, "name": name, "_links": {"self": {"href": f"/api/v3/users/{user_id}"}}}
+
+    def entry(user_id, project_id=7):
+        return {"id": 372, "spentOn": "2026-09-29", "hours": "PT2H", "comment": {"raw": "Carrito"},
+                "_links": {"user": {"href": f"/api/v3/users/{user_id}"}, "project": {"href": f"/api/v3/projects/{project_id}"},
+                           "entity": {"href": "/api/v3/work_packages/620"}}}
+
+    pages = {
+        "/api/v3/projects/demo": {"id": 7},
+        "/api/v3/users/me": person(43, "YO"),
+        "/api/v3/projects/7/types": {"_embedded": {"elements": [{"id": 1, "name": "Task"}]}},
+        "/api/v3/work_packages/533": {"id": 533, "subject": "Carrito", "_links": {"project": {"href": "/api/v3/projects/7"}}},
+        "/api/v3/principals": {"_embedded": {"elements": [person(8, "TOMÁS PÉREZ SOTO"), person(9, "CAMILA DÍAZ")]}},
+        "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [
+            {"id": 600, "subject": "Planning", "_links": {"assignee": {"href": "/api/v3/users/9"}}},
+            {"id": 601, "subject": "Login", "_links": {"assignee": {"href": "/api/v3/users/43"}}}]}},
+        "/api/v3/time_entries/372": entry(43),
+        "/api/v3/time_entries/373": entry(44),
+        "/api/v3/time_entries/374": entry(43, project_id=8),
+    }
+    writes = []
+
+    def fake_request(method, path, token, payload=None):
+        if method == "GET":
+            return pages[path.split("?")[0]]
+        writes.append((method, path, payload))
+        return {**entry(43), **(payload or {}), "subject": (payload or {}).get("subject")}
+
+    terminal = mock.Mock(**{"isatty.return_value": False})
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
+            mock.patch.object(sys, "stdin", terminal), contextlib.redirect_stdout(io.StringIO()):
+        # El mismo asunto con otra persona es otra tarea; con la misma persona, ya existe. Sin --asignar es tuya.
+        create_work_package("demo", "planning", parent=533, assignee_text="tomas")
+        create_work_package("demo", "Planning", assignee_text="camila")
+        create_work_package("demo", "login")
+        create_work_package("demo", "Logout")
+        assert [(m, p) for m, p, _ in writes] == [("POST", "/api/v3/projects/7/work_packages")] * 2
+        assert set(writes[0][2]["_links"]) == {"type", "parent", "assignee"}
+        assert writes[1][2]["_links"]["assignee"] == {"href": "/api/v3/users/43"}
+        writes.clear()
+        edit_hours("demo", 372, hours=1.5, day="2026-09-28")
+        delete_hours("demo", 372)
+        assert writes == [("PATCH", "/api/v3/time_entries/372", {"hours": "PT1H30M", "spentOn": "2026-09-28"}),
+                          ("DELETE", "/api/v3/time_entries/372", None)]
+        writes.clear()
+        # En una terminal solo borra si la respuesta es si.
+        terminal.isatty.return_value = True
+        with mock.patch("builtins.input", side_effect=["no", "Sí"]):
+            delete_hours("demo", 372)
+            delete_hours("demo", 372)
+        terminal.isatty.return_value = False
+        assert writes == [("DELETE", "/api/v3/time_entries/372", None)]
+        writes.clear()
+        assert "Solo cambio los tuyos" in error_of(edit_hours, "demo", 373, 1.0)
+        assert "Solo cambio los tuyos" in error_of(delete_hours, "demo", 373)
+        assert "no es de tu proyecto" in error_of(delete_hours, "demo", 374)
+        edit_hours("demo", 372, hours=1.0, dry_run=True)
+        delete_hours("demo", 372, dry_run=True)
+        assert "Dime que cambiar" in error_of(edit_hours, "demo", 372)
+        assert "asunto" in error_of(create_work_package, "demo", "  ")
+        assert writes == []
+
+
+def check_team_views():
+    """--sprint-actual y --horas-equipo, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    sprints = [{"id": 1, "name": "Sprint 1", "startDate": "2026-09-09", "endDate": "2026-09-23"},
+               {"id": 2, "name": "Sprint 2", "startDate": "2026-09-24", "endDate": "2026-10-06"},
+               {"id": 3, "name": "Sprint 3", "startDate": "2026-10-08", "endDate": "2026-10-21"},
+               {"id": 9, "name": "Product Backlog", "startDate": None, "endDate": None}]
+    assert [s["id"] for s in [split_sprints(sprints, "2026-10-08")[0]] + split_sprints(sprints, "2026-10-08")[1]] == [3, 1, 2]
+    assert split_sprints(sprints, "2026-10-07")[0]["id"] == 3  # entre dos sprints, el proximo
+    assert split_sprints(sprints, "2026-10-21")[0]["id"] == 3  # el ultimo dia todavia cuenta
+    assert split_sprints(sprints, "2026-11-30") == (None, sprints[:3])
+
+    def task(task_id, user_id, status):
+        return {"id": task_id, "subject": f"Tarea {task_id}", "percentageDone": 0,
+                "_links": {"assignee": {"href": f"/api/v3/users/{user_id}", "title": f"P{user_id}"},
+                           "status": {"href": f"/api/v3/statuses/{status}", "title": "S"},
+                           "version": {"title": "Sprint 2"}}}
+
+    def hours(user_id, day, duration):
+        return {"spentOn": day, "hours": duration, "_links": {"user": {"title": f"P{user_id}"}}}
+
+    entries = [hours(1, "2026-10-06", "PT2H"), hours(1, "2026-10-07", "PT30M"), hours(2, "2026-10-07", "PT1H")]
+    assert hours_by_person(entries) == {"P1": (2.5, {"2026-10-06", "2026-10-07"}), "P2": (1.0, {"2026-10-07"})}
+
+    def fake_request(method, path, token, payload=None):
+        query = urllib.parse.unquote(path)
+        if "/versions" in path:
+            return {"_embedded": {"elements": sprints}}
+        if "/statuses" in path:
+            return {"_embedded": {"elements": [{"isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}}
+        if "/work_packages" in path:  # el sprint en curso, o lo que quedo abierto de los anteriores
+            rows = [task(10, 1, 1), task(11, 1, 7), task(12, 2, 1)] if '"*"' in query else [task(5, 2, 1)]
+            return {"_embedded": {"elements": rows}}
+        if "/time_entries" in path:
+            return {"total": 3, "_embedded": {"elements": entries}}
+        if "/memberships" in path:
+            roles = (("P1", "Developer"), ("P2", "Developer"), ("P3", "Developer"), ("P4", "Docente"))
+            return {"_embedded": {"elements": [{"_links": {"principal": {"title": name}, "roles": [{"title": role}]}}
+                                               for name, role in roles]}}
+        return {"id": 7, "_links": {"self": {"href": "/api/v3/users/1"}}}  # el proyecto y /users/me
+
+    output = io.StringIO()
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
+            contextlib.redirect_stdout(output):
+        sprint_status("demo")
+        team_hours("demo", "2026-10-01")
+    text = output.getvalue()
+    assert "Tus tareas abiertas: 1\n  #10 " in text and "#11" not in text
+    assert "Siguen abiertas de sprints que ya terminaron: 1" in text
+    assert "Sin horas en estas fechas: P3\n" in text  # P4 es docente
+
+
+def check_story_points():
+    """El reparto de --puntos y su escritura, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    parts, step = split_points(8, [9, 11, 8, 8, 18, 11, 7, 4])
+    assert sum(parts) == 8 and step == 0.5 and parts[4] == 2
+    assert split_points(3, [13, 12, 7]) == ([1.5, 1.0, 0.5], 0.5)
+    # Tareas con las mismas horas reciben lo mismo, y una con mas horas nunca recibe menos.
+    same, _ = split_points(13, [4, 6, 3, 6, 6, 6, 5, 6, 5, 6, 5])
+    assert sum(same) == 13 and len({same[k] for k in (1, 3, 4, 5, 7, 9)}) == 1 and len({same[k] for k in (6, 8, 10)}) == 1
+    assert same[1] >= same[6] >= same[0] >= same[2]
+    # Con medios puntos no sale parejo, asi que baja a cuartos.
+    odd, step = split_points(5, [11, 11, 7, 11, 13, 5, 5])
+    assert sum(odd) == 5 and step == 0.25 and odd[0] == odd[1] == odd[3] and odd[5] == odd[6]
+    assert sum(apportion(100, [6] * 11)) == 100 and split_points(5, [3, 0]) == ([5.0, 0.0], 0.5)
+    assert weight_arg("540=8,5") == (540, 8.5)
+    # El reparto de 8 puntos entre 8, 1, 1, 4, 8, 8 y 2 horas rompia el empate de las tres de 8.
+    tied, _ = split_points(8, [8, 1, 1, 4, 8, 8, 2])
+    assert sum(tied) == 8 and tied[0] == tied[4] == tied[5] and tied[1] == tied[2]
+    assert "no caben en 1 puntos" in error_of(split_points, 1, [1] * 5)
+    for bad in ("540", "x=2", "540=-1", "540=nan", "540=inf"):
+        try:
+            weight_arg(bad)
+            raise AssertionError(f"weight_arg acepto {bad}")
+        except argparse.ArgumentTypeError:
+            pass
+
+    once = with_points_block("Como usuario quiero pagar.", POINTS_HEADER + "\n\nredondeada a medio punto.")
+    twice = with_points_block(once + "\n\nNota del equipo.", POINTS_HEADER + "\n\nredondeada a un cuarto de punto.")
+    assert twice == "Como usuario quiero pagar.\n\n**Puntos por tarea**\n\nredondeada a un cuarto de punto.\n\nNota del equipo."
+
+    def task(task_id, estimated, subject="Tarea"):
+        return {"id": task_id, "subject": subject, "estimatedTime": estimated}
+
+    story = {"id": 533, "lockVersion": 2, "subject": "Pago", "storyPoints": 5, "description": {"raw": "Texto."},
+             "_links": {"project": {"href": "/api/v3/projects/7"}, "type": {"title": "User story"}}}
+    pages = {"/api/v3/projects/demo": {"id": 7}, "/api/v3/work_packages/533": story,
+             "/api/v3/work_packages/534": {**task(534, "PT3H"), "_links": {**story["_links"], "type": {"title": "Task"}}},
+             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [task(536, None), task(535, "PT6H", "A | B")]}}}
+    patches = []
+
+    def fake_request(method, path, token, payload=None):
+        if method == "PATCH":
+            patches.append(payload)
+        return pages[path.split("?")[0]]
+
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        assert "Sin horas estimadas: #536" in error_of(story_points, "demo", 533)
+        assert "no estan dentro de #533" in error_of(story_points, "demo", 533, None, [(999, 2)])
+        assert "solo las User story" in error_of(story_points, "demo", 534)
+        story_points("demo", 533, weights=[(536, 3)], dry_run=True)
+        assert patches == []
+        story_points("demo", 533, total=3, weights=[(536, 3)])
+    assert patches[0]["storyPoints"] == 3 and patches[0]["lockVersion"] == 2
+    raw = patches[0]["description"]["raw"]
+    assert raw.startswith("Texto.\n\n**Puntos por tarea**") and "| #535 A / B | 2 | 67% |" in raw and "| #536 Tarea | 1 | 33% |" in raw
+    story["storyPoints"] = None
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"):
+        assert "--total" in error_of(story_points, "demo", 533)
+
+
 def self_check():
     assert iso_duration(360) == "PT6H" and iso_duration(15) == "PT15M" and iso_duration(137) == "PT2H17M"
     assert hours_from_iso("PT2H30M") == 2.5 and hours_from_iso("PT45M") == 0.75 and hours_from_iso(None) == 0
-    assert hours_from_iso("PT1.5H") == 1.5
+    assert hours_from_iso("PT1.5H") == 1.5 and hours_from_iso("P1DT2H") == 26 and hours_from_iso("P1W") == 168
+    assert hours_from_iso("2 horas") == 0
     assert percent_arg("0") == 0 and percent_arg("100") == 100
     assert hours_arg("6,5") == 6.5
     assert date_arg("2026-09-29") == "2026-09-29"
@@ -583,6 +1135,7 @@ def self_check():
         (hours_arg, "0"),
         (hours_arg, "-2"),
         (hours_arg, "25"),
+        (hours_arg, "0,005"),
         (date_arg, "29-09-2026"),
         (date_arg, (datetime.date.today() + datetime.timedelta(days=1)).isoformat()),
     ):
@@ -624,6 +1177,9 @@ def self_check():
     assert github_commit_url("https://ana:token123@github.com/ana/repo.git", "abc") is None
     assert github_commit_url("https://gitlab.com/ana/repo.git", "abc") is None
     check_api_flows()
+    check_new_commands()
+    check_team_views()
+    check_story_points()
     print("autotest: todo bien")
     return 0
 
@@ -636,20 +1192,32 @@ def main():
     group.add_argument("--mis-horas", action="store_true", help="lista tus horas registradas")
     group.add_argument("--wp", type=int, metavar="ID", help="numero de la tarea a actualizar, ej. --wp 620")
     group.add_argument("--report", action="store_true", help="estado del proyecto por persona")
+    group.add_argument("--sprint-actual", action="store_true", help="el sprint en curso y lo que quedo abierto")
+    group.add_argument("--horas-equipo", action="store_true", help="horas de cada integrante (desde el lunes)")
     group.add_argument("--miembros", action="store_true", help="lista los miembros del proyecto")
     group.add_argument("--commit", action="store_true", help="avisa en las tareas OP#numero del ultimo commit")
     group.add_argument("--en-texto", metavar="TEXTO", help="aplica los cambios a las tareas OP#numero del texto")
+    group.add_argument("--crear", metavar="ASUNTO", help="crea una tarea con ese asunto, si no existe ya")
+    group.add_argument("--editar-horas", type=int, metavar="ID", help="corrige un registro de --mis-horas")
+    group.add_argument("--borrar-horas", type=int, metavar="ID", help="borra un registro de --mis-horas")
+    group.add_argument("--puntos", type=int, metavar="ID", help="reparte los puntos de esa historia entre sus tareas")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
     parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
+    parser.add_argument("--tipo", help='con --crear: Task (por defecto), "User story", Epic, Bug...')
+    parser.add_argument("--padre", type=int, metavar="ID", help="tarea dentro de la cual queda, ej. su historia")
+    parser.add_argument("--descripcion", help="con --crear: descripcion de la tarea")
     parser.add_argument("--sprint", help='sprint al que mover la tarea, ej. "Sprint 2"')
     parser.add_argument("--status", help='estado nuevo, ej. "In progress" o "Done"')
     parser.add_argument("--percent", type=percent_arg, help="porcentaje completado, de 0 a 100")
     parser.add_argument("--hours", type=hours_arg, help="horas trabajadas (acepta 2,5)")
     parser.add_argument("--fecha", type=date_arg, help="dia de las horas, AAAA-MM-DD (por defecto, hoy)")
-    parser.add_argument("--desde", type=date_arg, help="con --mis-horas: solo desde esta fecha")
+    parser.add_argument("--desde", type=date_arg, help="con --mis-horas o --horas-equipo: desde esta fecha")
     parser.add_argument("--comment", help="comentario para la tarea (tambien acompana a las horas)")
     parser.add_argument("--prioridad", help="prioridad nueva: Low, Normal, High o Immediate")
     parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. tomas (ver --miembros)")
+    parser.add_argument("--total", type=points_arg, help="con --puntos: puntos de la historia, si no los tiene o para cambiarlos")
+    parser.add_argument("--peso", type=weight_arg, action="append", metavar="ID=HORAS",
+                        help="con --puntos: horas con que pesa una tarea, ej. 540=6 (se puede repetir)")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
 
@@ -665,27 +1233,38 @@ def main():
             return my_hours(wanted, args.desde)
         if args.report:
             return report(wanted)
+        if args.sprint_actual:
+            return sprint_status(wanted)
+        if args.horas_equipo:
+            return team_hours(wanted, args.desde)
         if args.miembros:
             return list_members(wanted)
-        changes = dict(sprint=args.sprint, status=args.status, percent=args.percent, day=args.fecha,
-                       priority=args.prioridad, assignee_text=args.asignar, dry_run=args.dry_run)
+        if args.editar_horas is not None:
+            return edit_hours(wanted, args.editar_horas, args.hours, args.fecha, args.comment, args.dry_run)
+        if args.borrar_horas is not None:
+            return delete_hours(wanted, args.borrar_horas, args.dry_run)
+        if args.puntos is not None:
+            others = (args.hours, args.comment, args.fecha, args.sprint, args.status, args.percent is not None,
+                      args.prioridad, args.asignar, args.padre)
+            if any(others):
+                raise RuntimeError("--puntos solo acepta --total, --peso y --dry-run. Cambia las tareas con --wp.")
+            return story_points(wanted, args.puntos, args.total, args.peso, args.dry_run)
+        if args.total or args.peso:
+            raise RuntimeError("--total y --peso van con --puntos.")
+        names = dict(sprint=args.sprint, status=args.status, priority=args.prioridad, assignee_text=args.asignar,
+                     parent=args.padre)
+        if args.crear is not None:
+            # Ignorarlas en silencio dejaria horas sin registrar creyendo que quedaron.
+            if args.hours or args.comment or args.fecha:
+                raise RuntimeError("--crear no registra horas ni comentarios. Crea la tarea y despues usa --wp con su numero.")
+            return create_work_package(wanted, args.crear, kind=args.tipo, description=args.descripcion,
+                                       percent=args.percent, dry_run=args.dry_run, **names)
+        changes = dict(percent=args.percent, day=args.fecha, dry_run=args.dry_run, **names)
         if args.commit:
             return from_last_commit(wanted, hours=args.hours, comment=args.comment, **changes)
         if args.en_texto is not None:
             return update_references(wanted, args.en_texto, hours=args.hours, comment=args.comment, **changes)
-        return update_work_package(
-            wanted,
-            args.wp,
-            sprint=args.sprint,
-            status=args.status,
-            percent=args.percent,
-            hours=args.hours,
-            day=args.fecha,
-            comment=args.comment,
-            priority=args.prioridad,
-            assignee_text=args.asignar,
-            dry_run=args.dry_run,
-        )
+        return update_work_package(wanted, args.wp, hours=args.hours, comment=args.comment, **changes)
     except (RuntimeError, KeyError, ValueError) as error:
         print(f"Error: {error}")
         return 1
