@@ -80,10 +80,14 @@ python gespro.py --wp 620 --sprint "Sprint 2"
 python gespro.py --wp 620 --prioridad High
 python gespro.py --wp 620 --asignar tomas
 python gespro.py --wp 620 --padre 533
+python gespro.py --wp 620 --estimado 3 --inicio 2026-10-09 --fin 2026-10-14
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
 - `--padre` deja la tarea dentro de otra, por ejemplo dentro de su historia.
+- `--estimado` son las horas que crees que tomará la tarea (el campo Trabajo de GesPro). Puede pasar
+  de 24 y es lo que usa `--puntos` para repartir. `--inicio` y `--fin` son las fechas de la tarea y
+  sí aceptan fechas futuras.
 - Sin `--fecha`, las horas quedan con la fecha de hoy. No acepta fechas futuras.
 - `--comment` queda como comentario en la tarea y también acompaña a las horas.
 - Agrega `--dry-run` para ver lo que haría sin escribir nada. Úsalo la primera vez.
@@ -99,6 +103,19 @@ muestra los nombres. Para ver los miembros:
 python gespro.py --miembros
 ```
 
+### Buscar y ver una tarea
+
+```
+python gespro.py --buscar carrito
+python gespro.py --ver 620
+```
+
+`--buscar` lista las tareas que tienen ese texto en el asunto, sin importar mayúsculas ni tildes, con
+su número, tipo, estado y a quién están asignadas. `--ver` muestra todo lo de una tarea: estado,
+fechas, horas estimadas y registradas, el comienzo de la descripción, las tareas que tiene dentro, los
+PR de GitHub enlazados y los últimos comentarios. Deja fuera las notas que GesPro agrega solo cuando
+cambia una de sus tareas.
+
 ### Crear una tarea
 
 ```
@@ -108,9 +125,10 @@ python gespro.py --crear "Pago con tarjeta" --tipo "User story" --padre 510 --sp
 
 Sin `--tipo`, crea una `Task`, y sin `--asignar` queda asignada a ti. También acepta `--descripcion`
 y las opciones de `--wp` que no son horas ni comentarios: `--sprint`, `--status`, `--percent`,
-`--prioridad` y `--asignar`.
+`--prioridad`, `--asignar`, `--estimado`, `--inicio` y `--fin`.
 
-Antes de crearla, busca una tarea con el mismo asunto y la misma persona asignada. Si la encuentra,
+Antes de crearla, busca una tarea con el mismo asunto, sin importar mayúsculas ni tildes, y la misma
+persona asignada. Si la encuentra,
 no crea otra y te da su número. Con otra persona asignada sí la crea, porque tareas como «Planning,
 dailies, review y retrospectiva» van una vez por integrante.
 

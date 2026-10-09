@@ -20,6 +20,11 @@ Los cambios de cada versión, del más nuevo al más antiguo.
 - `--puntos`: reparte los puntos de una User story entre sus tareas según sus horas estimadas y deja
   en la descripción de la historia una tabla con los puntos y el porcentaje que abarca cada tarea.
   `--total` da o cambia los puntos de la historia y `--peso ID=HORAS` fija las horas de una tarea.
+- `--estimado`, `--inicio` y `--fin` en `--wp` y `--crear`: horas estimadas y fechas de la tarea. Las
+  fechas pueden ser futuras.
+- `--buscar`: las tareas con un texto en el asunto, sin importar mayúsculas ni tildes.
+- `--ver`: todo lo de una tarea, con las tareas que tiene dentro, los PR enlazados y los últimos
+  comentarios.
 
 ### Corregido
 
