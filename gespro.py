@@ -69,7 +69,11 @@ POINTS_HEADER = "**Puntos por tarea**"
 # Nota que GesPro deja sola en una historia cuando cambia una de sus tareas, en cursiva y con el numero
 # de la tarea: "_Actualizado automaticamente cambiando los valores en el paquete de trabajo hijo #579_".
 AUTO_NOTE = re.compile(r"^_[^\n]*#\d+_$")
-POINTS_BLOCK = re.compile(r"\*\*Puntos por tarea\*\*.*?redondeada a (?:medio punto|un cuarto de punto)\.", re.DOTALL)
+# La tabla de --puntos es el encabezado y las filas que lo siguen; la frase que la explica termina con el
+# redondeo. Al repetir solo cambian esas dos cosas, porque el equipo escribe sus notas alrededor.
+# Una historia sin tareas puede tener el encabezado sin filas, con una nota debajo.
+POINTS_TABLE = re.compile(r"\*\*Puntos por tarea\*\*[ \t\r]*(?:\n|$)(?:[ \t\r]*\n)*(?:[ \t]*\|[^\n]*(?:\n|$))*")
+ROUNDING = re.compile(r"redondeada a (?:medio punto|un cuarto de punto)\.")
 
 
 def read_setting(name):
@@ -871,10 +875,20 @@ def points_block(tasks, parts, shares, step):
 
 
 def with_points_block(description, block):
-    """La descripcion con la tabla nueva en el lugar de la anterior, o al final si no tenia."""
-    if POINTS_BLOCK.search(description):
-        return POINTS_BLOCK.sub(lambda _: block, description, count=1)
-    return f"{description.rstrip()}\n\n{block}" if description.strip() else block
+    """La descripcion con la tabla nueva, al final si no tenia. Si ya tenia una, cambia solo la tabla y el
+    redondeo de la frase que la explica: lo escrito antes, despues o en esa misma frase queda igual."""
+    old = POINTS_TABLE.search(description)
+    if not old:
+        return f"{description.rstrip()}\n\n{block}" if description.strip() else block
+    table = POINTS_TABLE.match(block).group(0).rstrip("\n")
+    rounding = ROUNDING.search(block).group(0)
+    after = description[old.end():]
+    if ROUNDING.search(after):
+        after = ROUNDING.sub(lambda _: rounding, after, count=1)
+    else:
+        rest = after.lstrip("\n")
+        after = f"\n{block[len(table):].strip()}" + (f"\n\n{rest}" if rest else "")
+    return f"{description[:old.start()]}{table}\n{after}"
 
 
 def story_tasks(token, project_id, story_id):
@@ -1191,9 +1205,24 @@ def check_story_points():
         except argparse.ArgumentTypeError:
             pass
 
-    once = with_points_block("Como usuario quiero pagar.", POINTS_HEADER + "\n\nredondeada a medio punto.")
-    twice = with_points_block(once + "\n\nNota del equipo.", POINTS_HEADER + "\n\nredondeada a un cuarto de punto.")
-    assert twice == "Como usuario quiero pagar.\n\n**Puntos por tarea**\n\nredondeada a un cuarto de punto.\n\nNota del equipo."
+    pair = [{"id": 540, "subject": "Carrito"}, {"id": 541, "subject": "Pago"}]
+    first, second = points_block(pair, [1.5, 0.5], [75, 25], 0.5), points_block(pair, [1.25, 0.75], [62, 38], 0.25)
+    once = with_points_block("Como usuario quiero pagar.", first)
+    assert once == "Como usuario quiero pagar.\n\n" + first
+    # Al repetir cambian la tabla y el redondeo. Lo que el equipo escribio en la misma frase y despues queda.
+    edited = once.replace("Cada tarea", "Vale 2 de los 8 puntos del plan. Cada tarea") + "\n\nNota del equipo."
+    twice = with_points_block(edited, second)
+    assert twice.count(POINTS_HEADER) == 1 and "| 1,5 |" not in twice and "| 1,25 |" in twice
+    assert "Vale 2 de los 8 puntos del plan. Cada tarea" in twice
+    assert twice.endswith("un cuarto de punto.\n\nNota del equipo.") and with_points_block(twice, second) == twice
+    # Si alguien borro la frase que explica la tabla, vuelve a quedar justo despues de ella.
+    table, sentence = POINTS_TABLE.match(second).group(0).rstrip("\n"), second.split("\n\n")[-1]
+    bare = "Intro.\n\n" + POINTS_HEADER + "\n\n| a | 1 |\n\nOtra nota."
+    assert with_points_block(bare, second) == f"Intro.\n\n{table}\n\n{sentence}\n\nOtra nota."
+    # Una historia que todavia no tenia tareas: el encabezado sin tabla y una nota debajo.
+    empty = "Intro.\n\n" + POINTS_HEADER + "\n\nTodavia no tiene tareas."
+    assert with_points_block(empty, second) == f"Intro.\n\n{table}\n\n{sentence}\n\nTodavia no tiene tareas."
+    assert with_points_block("Intro.\n\n" + POINTS_HEADER, second) == f"Intro.\n\n{table}\n\n{sentence}"
 
     def task(task_id, estimated, subject="Tarea"):
         return {"id": task_id, "subject": subject, "estimatedTime": estimated}

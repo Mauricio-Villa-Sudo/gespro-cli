@@ -147,8 +147,9 @@ reciben lo mismo y una con más horas nunca recibe menos.
 
 Si la historia no tiene puntos, dáselos con `--total`, que también sirve para cambiarlos. Si una tarea
 no tiene horas estimadas, ponlas en GesPro (campo Trabajo) o usa `--peso ID=HORAS`, que además sirve
-para una tarea que pesa más o menos de lo que dicen sus horas. Si la historia ya tenía la tabla, la
-reemplaza y deja el resto de la descripción como estaba.
+para una tarea que pesa más o menos de lo que dicen sus horas. Si la historia ya tenía la tabla,
+cambia solo sus filas y el redondeo de la frase que la explica. Lo que escribiste antes, después o
+dentro de esa frase queda igual.
 
 GesPro tiene el campo de puntos solo en las User story, así que los puntos de cada tarea quedan en esa
 tabla.
