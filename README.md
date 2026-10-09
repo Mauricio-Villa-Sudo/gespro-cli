@@ -114,6 +114,27 @@ Antes de crearla, busca una tarea con el mismo asunto y la misma persona asignad
 no crea otra y te da su número. Con otra persona asignada sí la crea, porque tareas como «Planning,
 dailies, review y retrospectiva» van una vez por integrante.
 
+### Repartir los puntos de una historia
+
+```
+python gespro.py --puntos 533 --dry-run
+python gespro.py --puntos 533 --total 8 --peso 540=6 --peso 541=4
+```
+
+`--puntos` toma una User story y reparte sus puntos de historia entre sus tareas según las horas
+estimadas de cada una. En la descripción de la historia deja una tabla con los puntos de cada tarea y
+el porcentaje de la historia que abarca. Los puntos van en pasos de medio punto, o de un cuarto cuando
+con medios no sale un reparto parejo. Mientras los puntos alcancen, dos tareas con las mismas horas
+reciben lo mismo y una con más horas nunca recibe menos.
+
+Si la historia no tiene puntos, dáselos con `--total`, que también sirve para cambiarlos. Si una tarea
+no tiene horas estimadas, ponlas en GesPro (campo Trabajo) o usa `--peso ID=HORAS`, que además sirve
+para una tarea que pesa más o menos de lo que dicen sus horas. Si la historia ya tenía la tabla, la
+reemplaza y deja el resto de la descripción como estaba.
+
+GesPro tiene el campo de puntos solo en las User story, así que los puntos de cada tarea quedan en esa
+tabla.
+
 ### Corregir horas
 
 ```

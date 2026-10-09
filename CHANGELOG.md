@@ -17,10 +17,16 @@ Los cambios de cada versión, del más nuevo al más antiguo.
   cada persona, tus tareas abiertas y lo que quedó abierto de sprints anteriores.
 - `--horas-equipo`: las horas de cada integrante desde el lunes, o desde `--desde`, y quién con rol
   Developer no ha registrado.
+- `--puntos`: reparte los puntos de una User story entre sus tareas según sus horas estimadas y deja
+  en la descripción de la historia una tabla con los puntos y el porcentaje que abarca cada tarea.
+  `--total` da o cambia los puntos de la historia y `--peso ID=HORAS` fija las horas de una tarea.
 
 ### Corregido
 
 - `--hours` y la línea `Horas:` rechazan menos de un minuto. Antes quedaba un registro de 0 minutos.
+- OpenProject a veces devuelve una duración larga en días o semanas («P1DT2H», «P1W») y el script la
+  leía como 0. Ahora cuenta 24 horas por día y 168 por semana en `--mis-tareas`, `--mis-horas`,
+  `--report` y `--horas-equipo`.
 
 ## 1.3.1, 8 de octubre de 2026
 

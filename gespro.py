@@ -22,6 +22,7 @@ Uso:
     python gespro.py --report                             estado del proyecto por persona
     python gespro.py --sprint-actual                      el sprint en curso y lo que quedo abierto de los anteriores
     python gespro.py --horas-equipo [--desde 2026-10-01]  horas de cada integrante (desde el lunes si no hay fecha)
+    python gespro.py --puntos 533 [--total 8] [--peso 540=6]   reparte los puntos de la historia entre sus tareas
     python gespro.py --check                              prueba local, sin red
 
 Las opciones de --wp se pueden combinar en una sola llamada. --dry-run muestra lo que haria sin
@@ -39,6 +40,7 @@ import datetime
 import http.client
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -59,6 +61,9 @@ REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
 HOURS_LINE = re.compile(r"^[ \t]*(?:horas|hours)[ \t]*:(.*)$", re.IGNORECASE | re.MULTILINE)
 # Accion del reflog de un commit nuevo. amend, rebase y cherry-pick repiten un mensaje que ya se registro.
 NEW_COMMIT = {"commit", "commit (initial)", "commit (merge)"}
+# La tabla que escribe --puntos va del encabezado a la frase que la cierra. Al repetir, se reemplaza.
+POINTS_HEADER = "**Puntos por tarea**"
+POINTS_BLOCK = re.compile(r"\*\*Puntos por tarea\*\*.*?redondeada a (?:medio punto|un cuarto de punto)\.", re.DOTALL)
 
 
 def read_setting(name):
@@ -92,6 +97,25 @@ def hours_arg(value):
     if not 0 < number <= 24 or round(number * 60) < 1:
         raise argparse.ArgumentTypeError("tiene que ser de al menos un minuto (0,02) y como maximo 24")
     return number
+
+
+def points_arg(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("tiene que ser un entero mayor que 0")
+    return number
+
+
+def weight_arg(value):
+    """'540=8,5' -> (540, 8.5): las horas con que pesa la tarea 540 en --puntos."""
+    task, separator, hours = value.partition("=")
+    try:
+        pair = (int(task), float(hours.replace(",", ".")))
+    except ValueError:
+        pair = None
+    if not separator or pair is None or not math.isfinite(pair[1]) or pair[1] < 0:
+        raise argparse.ArgumentTypeError("usa ID=HORAS, por ejemplo 540=8,5")
+    return pair
 
 
 def date_arg(value):
@@ -139,18 +163,13 @@ def iso_duration(minutes):
 
 
 def hours_from_iso(duration):
-    """'PT2H30M' -> 2.5. OpenProject devuelve las horas en formato ISO 8601."""
-    if not duration or not duration.startswith("PT"):
+    """'PT2H30M' -> 2.5. OpenProject devuelve las horas en formato ISO 8601, y a veces con semanas y dias
+    de 24 horas: 'P1DT2H' son 26."""
+    match = re.fullmatch(r"P(?:([\d.]+)W)?(?:([\d.]+)D)?(?:T(?:([\d.]+)H)?(?:([\d.]+)M)?(?:([\d.]+)S)?)?", duration or "")
+    if not match:
         return 0.0
-    total, number = 0.0, ""
-    for char in duration[2:]:
-        if char.isdigit() or char == ".":
-            number += char
-            continue
-        value = float(number or 0)
-        total += {"H": value, "M": value / 60, "S": value / 3600}.get(char, 0)
-        number = ""
-    return round(total, 2)
+    weeks, days, hours, minutes, seconds = (float(value or 0) for value in match.groups())
+    return round(weeks * 168 + days * 24 + hours + minutes / 60 + seconds / 3600, 2)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -680,6 +699,129 @@ def update_references(wanted, text, hours=None, **changes):
     return 1 if failed else 0
 
 
+def apportion(units, weights, at_least_one=False, strict=False):
+    """Reparte units enteros segun weights. La suma calza exacto, las tareas con el mismo peso reciben lo
+    mismo y una con mas peso nunca recibe menos que otra con menos. Si no hay un reparto asi, con strict
+    devuelve None y sin strict desempata por resto mayor."""
+    total = sum(weights)
+    if total <= 0:
+        return [0] * len(weights)
+    raw = [units * w / total for w in weights]
+    got = [max(1, int(r)) if at_least_one and w > 0 else int(r) for r, w in zip(raw, weights)]
+    while sum(got) > units:
+        k = max((k for k in range(len(got)) if got[k] > 1), key=lambda k: got[k] - raw[k])
+        got[k] -= 1
+    left = units - sum(got)
+    groups = sorted({w: [k for k, other in enumerate(weights) if other == w] for w in weights if w > 0}.items())
+    best, best_error = None, None
+    # Prueba todas las combinaciones de grupos de igual peso; alcanza para unos 15 pesos distintos.
+    for mask in range(1 << len(groups)):
+        chosen = [k for i, (_, ks) in enumerate(groups) if mask >> i & 1 for k in ks]
+        if len(chosen) != left:
+            continue
+        trial = [g + (k in chosen) for k, g in enumerate(got)]
+        values = [trial[ks[0]] for _, ks in groups]
+        if any(trial[k] != trial[ks[0]] for _, ks in groups for k in ks) or any(a > b for a, b in zip(values, values[1:])):
+            continue
+        error = sum((t - r) ** 2 for t, r in zip(trial, raw))
+        if best_error is None or error < best_error:
+            best, best_error = trial, error
+    if best is not None or strict:
+        return best
+    while sum(got) < units:
+        k = max((k for k in range(len(got)) if weights[k] > 0), key=lambda k: raw[k] - got[k])
+        got[k] += 1
+    return got
+
+
+def split_points(points, weights):
+    """Puntos por tarea en pasos de 0,5, o de 0,25 si con medios puntos no sale un reparto parejo.
+    Cada tarea con peso recibe al menos un paso. Devuelve los puntos y el paso."""
+    positive = sum(1 for w in weights if w > 0)
+    for step in (0.5, 0.25):
+        units = round(points / step)
+        if positive <= units:
+            got = apportion(units, weights, at_least_one=True, strict=True)
+            if got is not None:
+                return [u * step for u in got], step
+    if positive > points * 4:
+        raise RuntimeError(f"{positive} tareas no caben en {points} puntos: cada una necesita al menos un cuarto. "
+                           "Sube --total o deja fuera alguna con --peso ID=0.")
+    return [u * 0.25 for u in apportion(round(points / 0.25), weights, at_least_one=True)], 0.25
+
+
+def points_text(value):
+    return f"{value:g}".replace(".", ",")
+
+
+def points_block(tasks, parts, shares, step):
+    rounding = "medio punto" if step == 0.5 else "un cuarto de punto"
+    lines = [POINTS_HEADER, "", "| Tarea | Puntos | Abarca |", "|---|---:|---:|"]
+    for task, part, share in zip(tasks, parts, shares):
+        lines.append(f"| #{task['id']} {task['subject'].replace('|', '/')} | {points_text(part)} | {share}% |")
+    lines += [f"| **Total** | **{points_text(sum(parts))}** | **100%** |", "",
+              f"Cada tarea recibe la parte que le toca segun sus horas estimadas (columna Abarca), redondeada a {rounding}."]
+    return "\n".join(lines)
+
+
+def with_points_block(description, block):
+    """La descripcion con la tabla nueva en el lugar de la anterior, o al final si no tenia."""
+    if POINTS_BLOCK.search(description):
+        return POINTS_BLOCK.sub(lambda _: block, description, count=1)
+    return f"{description.rstrip()}\n\n{block}" if description.strip() else block
+
+
+def story_tasks(token, project_id, story_id):
+    filters = [{"parent": {"operator": "=", "values": [str(story_id)]}}, {"status": {"operator": "*", "values": []}}]
+    path = with_filters(f"/api/v3/projects/{project_id}/work_packages", filters, pageSize=500)
+    return sorted(elements(request("GET", path, token)), key=lambda task: task["id"])
+
+
+def task_weights(story_id, tasks, weights):
+    """Las horas de cada tarea: las de --peso o, si no, las estimadas en GesPro."""
+    weights = dict(weights or [])
+    unknown = sorted(set(weights) - {task["id"] for task in tasks})
+    if unknown:
+        listed = ", ".join(f"#{i}" for i in unknown)
+        raise RuntimeError(f"--peso habla de tareas que no estan dentro de #{story_id}: {listed}.")
+    hours = [weights.get(task["id"], hours_from_iso(task.get("estimatedTime"))) for task in tasks]
+    missing = [task["id"] for task, h in zip(tasks, hours) if not h and task["id"] not in weights]
+    if missing:
+        listed = ", ".join(f"#{i}" for i in missing)
+        raise RuntimeError(f"Sin horas estimadas: {listed}. Ponlas en GesPro (campo Trabajo) o usa --peso {missing[0]}=3.")
+    if not sum(hours):
+        raise RuntimeError("Todas las tareas pesan 0; asi no hay como repartir.")
+    return hours
+
+
+def story_points(wanted, story_id, total=None, weights=None, dry_run=False):
+    """Reparte los puntos de una historia entre sus tareas segun sus horas y deja la tabla en la
+    descripcion de la historia. Si ya tenia una tabla de --puntos, la reemplaza."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    story = task_in_project(token, story_id, project_id)
+    if "storyPoints" not in story:
+        kind = story["_links"]["type"]["title"]
+        raise RuntimeError(f"#{story_id} es de tipo {kind}; solo las User story tienen puntos de historia.")
+    points = total or story.get("storyPoints")
+    if not points:
+        raise RuntimeError(f"#{story_id} no tiene puntos de historia. Daselos con --total, por ejemplo --total 5.")
+    tasks = story_tasks(token, project_id, story_id)
+    if not tasks:
+        raise RuntimeError(f"#{story_id} no tiene tareas. Mete una con --wp ID --padre {story_id}.")
+    hours = task_weights(story_id, tasks, weights)
+    parts, step = split_points(points, hours)
+    block = points_block(tasks, parts, apportion(100, hours), step)
+    print(f"#{story_id}: {story['subject']} ({points} puntos)\n\n{block}\n")
+    if dry_run:
+        print("(simulacion) no escribo nada")
+        return 0
+    description = (story.get("description") or {}).get("raw") or ""
+    patch_work_package(token, story, storyPoints=points, description={"raw": with_points_block(description, block)})
+    print(f"#{story_id} queda con {points} puntos y la tabla en su descripcion.")
+    return 0
+
+
 def git(*args, check=True):
     # Git escribe UTF-8; sin encoding, Windows lo leeria como cp1252 y romperia las tildes.
     result = subprocess.run(["git", *args], capture_output=True, encoding="utf-8", errors="replace", check=check)
@@ -917,10 +1059,73 @@ def check_team_views():
     assert "Sin horas en estas fechas: P3\n" in text  # P4 es docente
 
 
+def check_story_points():
+    """El reparto de --puntos y su escritura, con respuestas fijas en vez de la red."""
+    from unittest import mock
+
+    parts, step = split_points(8, [9, 11, 8, 8, 18, 11, 7, 4])
+    assert sum(parts) == 8 and step == 0.5 and parts[4] == 2
+    assert split_points(3, [13, 12, 7]) == ([1.5, 1.0, 0.5], 0.5)
+    # Tareas con las mismas horas reciben lo mismo, y una con mas horas nunca recibe menos.
+    same, _ = split_points(13, [4, 6, 3, 6, 6, 6, 5, 6, 5, 6, 5])
+    assert sum(same) == 13 and len({same[k] for k in (1, 3, 4, 5, 7, 9)}) == 1 and len({same[k] for k in (6, 8, 10)}) == 1
+    assert same[1] >= same[6] >= same[0] >= same[2]
+    # Con medios puntos no sale parejo, asi que baja a cuartos.
+    odd, step = split_points(5, [11, 11, 7, 11, 13, 5, 5])
+    assert sum(odd) == 5 and step == 0.25 and odd[0] == odd[1] == odd[3] and odd[5] == odd[6]
+    assert sum(apportion(100, [6] * 11)) == 100 and split_points(5, [3, 0]) == ([5.0, 0.0], 0.5)
+    assert weight_arg("540=8,5") == (540, 8.5)
+    # El reparto de 8 puntos entre 8, 1, 1, 4, 8, 8 y 2 horas rompia el empate de las tres de 8.
+    tied, _ = split_points(8, [8, 1, 1, 4, 8, 8, 2])
+    assert sum(tied) == 8 and tied[0] == tied[4] == tied[5] and tied[1] == tied[2]
+    assert "no caben en 1 puntos" in error_of(split_points, 1, [1] * 5)
+    for bad in ("540", "x=2", "540=-1", "540=nan", "540=inf"):
+        try:
+            weight_arg(bad)
+            raise AssertionError(f"weight_arg acepto {bad}")
+        except argparse.ArgumentTypeError:
+            pass
+
+    once = with_points_block("Como usuario quiero pagar.", POINTS_HEADER + "\n\nredondeada a medio punto.")
+    twice = with_points_block(once + "\n\nNota del equipo.", POINTS_HEADER + "\n\nredondeada a un cuarto de punto.")
+    assert twice == "Como usuario quiero pagar.\n\n**Puntos por tarea**\n\nredondeada a un cuarto de punto.\n\nNota del equipo."
+
+    def task(task_id, estimated, subject="Tarea"):
+        return {"id": task_id, "subject": subject, "estimatedTime": estimated}
+
+    story = {"id": 533, "lockVersion": 2, "subject": "Pago", "storyPoints": 5, "description": {"raw": "Texto."},
+             "_links": {"project": {"href": "/api/v3/projects/7"}, "type": {"title": "User story"}}}
+    pages = {"/api/v3/projects/demo": {"id": 7}, "/api/v3/work_packages/533": story,
+             "/api/v3/work_packages/534": {**task(534, "PT3H"), "_links": {**story["_links"], "type": {"title": "Task"}}},
+             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [task(536, None), task(535, "PT6H", "A | B")]}}}
+    patches = []
+
+    def fake_request(method, path, token, payload=None):
+        if method == "PATCH":
+            patches.append(payload)
+        return pages[path.split("?")[0]]
+
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
+            contextlib.redirect_stdout(io.StringIO()):
+        assert "Sin horas estimadas: #536" in error_of(story_points, "demo", 533)
+        assert "no estan dentro de #533" in error_of(story_points, "demo", 533, None, [(999, 2)])
+        assert "solo las User story" in error_of(story_points, "demo", 534)
+        story_points("demo", 533, weights=[(536, 3)], dry_run=True)
+        assert patches == []
+        story_points("demo", 533, total=3, weights=[(536, 3)])
+    assert patches[0]["storyPoints"] == 3 and patches[0]["lockVersion"] == 2
+    raw = patches[0]["description"]["raw"]
+    assert raw.startswith("Texto.\n\n**Puntos por tarea**") and "| #535 A / B | 2 | 67% |" in raw and "| #536 Tarea | 1 | 33% |" in raw
+    story["storyPoints"] = None
+    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"):
+        assert "--total" in error_of(story_points, "demo", 533)
+
+
 def self_check():
     assert iso_duration(360) == "PT6H" and iso_duration(15) == "PT15M" and iso_duration(137) == "PT2H17M"
     assert hours_from_iso("PT2H30M") == 2.5 and hours_from_iso("PT45M") == 0.75 and hours_from_iso(None) == 0
-    assert hours_from_iso("PT1.5H") == 1.5
+    assert hours_from_iso("PT1.5H") == 1.5 and hours_from_iso("P1DT2H") == 26 and hours_from_iso("P1W") == 168
+    assert hours_from_iso("2 horas") == 0
     assert percent_arg("0") == 0 and percent_arg("100") == 100
     assert hours_arg("6,5") == 6.5
     assert date_arg("2026-09-29") == "2026-09-29"
@@ -974,6 +1179,7 @@ def self_check():
     check_api_flows()
     check_new_commands()
     check_team_views()
+    check_story_points()
     print("autotest: todo bien")
     return 0
 
@@ -994,6 +1200,7 @@ def main():
     group.add_argument("--crear", metavar="ASUNTO", help="crea una tarea con ese asunto, si no existe ya")
     group.add_argument("--editar-horas", type=int, metavar="ID", help="corrige un registro de --mis-horas")
     group.add_argument("--borrar-horas", type=int, metavar="ID", help="borra un registro de --mis-horas")
+    group.add_argument("--puntos", type=int, metavar="ID", help="reparte los puntos de esa historia entre sus tareas")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
     parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
     parser.add_argument("--tipo", help='con --crear: Task (por defecto), "User story", Epic, Bug...')
@@ -1008,6 +1215,9 @@ def main():
     parser.add_argument("--comment", help="comentario para la tarea (tambien acompana a las horas)")
     parser.add_argument("--prioridad", help="prioridad nueva: Low, Normal, High o Immediate")
     parser.add_argument("--asignar", metavar="NOMBRE", help="parte del nombre del miembro, ej. tomas (ver --miembros)")
+    parser.add_argument("--total", type=points_arg, help="con --puntos: puntos de la historia, si no los tiene o para cambiarlos")
+    parser.add_argument("--peso", type=weight_arg, action="append", metavar="ID=HORAS",
+                        help="con --puntos: horas con que pesa una tarea, ej. 540=6 (se puede repetir)")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
 
@@ -1033,6 +1243,14 @@ def main():
             return edit_hours(wanted, args.editar_horas, args.hours, args.fecha, args.comment, args.dry_run)
         if args.borrar_horas is not None:
             return delete_hours(wanted, args.borrar_horas, args.dry_run)
+        if args.puntos is not None:
+            others = (args.hours, args.comment, args.fecha, args.sprint, args.status, args.percent is not None,
+                      args.prioridad, args.asignar, args.padre)
+            if any(others):
+                raise RuntimeError("--puntos solo acepta --total, --peso y --dry-run. Cambia las tareas con --wp.")
+            return story_points(wanted, args.puntos, args.total, args.peso, args.dry_run)
+        if args.total or args.peso:
+            raise RuntimeError("--total y --peso van con --puntos.")
         names = dict(sprint=args.sprint, status=args.status, priority=args.prioridad, assignee_text=args.asignar,
                      parent=args.padre)
         if args.crear is not None:
