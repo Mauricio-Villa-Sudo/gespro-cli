@@ -26,7 +26,7 @@ import urllib.request
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.4"
+USER_AGENT = "gespro-cli/1.5"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
