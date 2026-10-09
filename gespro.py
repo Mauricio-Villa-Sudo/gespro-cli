@@ -1,39 +1,9 @@
 #!/usr/bin/env python3
 """Cliente de linea de comandos para GesPro (https://gespro.devhub.cl), el OpenProject de la carrera.
 
-Uso:
-    python gespro.py --proyectos                          proyectos que ve tu token
-    python gespro.py --mis-tareas                         tus tareas, con estado, % y horas
-    python gespro.py --mis-horas [--desde 2026-09-28]     tus horas ya registradas
-    python gespro.py --wp 620 --status "In progress"      cambia el estado de una tarea
-    python gespro.py --wp 620 --percent 50                progreso
-    python gespro.py --wp 620 --hours 2.5 [--fecha 2026-09-29]   registra horas (hoy si no hay fecha)
-    python gespro.py --wp 620 --comment "texto"           deja un comentario
-    python gespro.py --wp 620 --sprint "Sprint 2"         mueve la tarea a un sprint
-    python gespro.py --wp 620 --prioridad High            prioridad: Low, Normal, High o Immediate
-    python gespro.py --wp 620 --asignar tomas             reasigna la tarea a otro miembro
-    python gespro.py --wp 620 --padre 533                 la deja dentro de otra tarea (su historia)
-    python gespro.py --wp 620 --estimado 3 --inicio 2026-10-09 --fin 2026-10-14   horas estimadas y fechas
-    python gespro.py --ver 620                            todo lo de una tarea, con sus comentarios
-    python gespro.py --buscar carrito                     encuentra el numero de una tarea por su asunto
-    python gespro.py --crear "Carrito: quitar items" --padre 533 --asignar tomas   crea una tarea
-    python gespro.py --editar-horas 372 --hours 1,5       corrige un registro de --mis-horas
-    python gespro.py --borrar-horas 372                   borra un registro tuyo
-    python gespro.py --miembros                           miembros del proyecto (para --asignar)
-    python gespro.py --commit                             avisa en las tareas OP#numero del ultimo commit
-    python gespro.py --en-texto "texto con OP#620" --status "In Review"   aplica a las tareas del texto
-    python gespro.py --report                             estado del proyecto por persona
-    python gespro.py --sprint-actual                      el sprint en curso y lo que quedo abierto de los anteriores
-    python gespro.py --horas-equipo [--desde 2026-10-01]  horas de cada integrante (desde el lunes si no hay fecha)
-    python gespro.py --puntos 533 [--total 8] [--peso 540=6]   reparte los puntos de la historia entre sus tareas
-    python gespro.py --check                              prueba local, sin red
-
-Las opciones de --wp se pueden combinar en una sola llamada. --dry-run muestra lo que haria sin
-escribir nada.
-
-El token (GESPRO_API_KEY) y el proyecto (GESPRO_PROJECT) se leen de variables de entorno o del
-archivo gespro.env que esta junto a este script. --proyecto cambia el proyecto en una llamada.
-Cada persona usa su token: las horas quedan a nombre del dueno del token.
+Las opciones estan en `python gespro.py --help` y los ejemplos en el README. El token (GESPRO_API_KEY)
+y el proyecto (GESPRO_PROJECT) salen de variables de entorno o de gespro.env, junto a este script, y
+las horas quedan a nombre del dueno del token.
 """
 
 import argparse
@@ -101,11 +71,10 @@ def percent_arg(value):
 
 
 def hours_arg(value):
-    # Una hora negativa generaria duraciones como "PT-1H" que la API acepta igual, y menos de un
-    # minuto se redondearia a un registro de 0 minutos.
-    number = float(value.replace(",", "."))
-    if not 0 < number <= 24 or round(number * 60) < 1:
-        raise argparse.ArgumentTypeError("tiene que ser de al menos un minuto (0,02) y como maximo 24")
+    # estimate_arg ya rechaza lo negativo ("PT-1H", que la API acepta igual) y lo que no llega a un minuto.
+    number = estimate_arg(value)
+    if number > 24:
+        raise argparse.ArgumentTypeError("tiene que ser como maximo 24")
     return number
 
 
@@ -177,11 +146,7 @@ def github_commit_url(remote, full_hash):
 
 def iso_duration(minutes):
     hours, rest = divmod(minutes, 60)
-    if hours and rest:
-        return f"PT{hours}H{rest}M"
-    if hours:
-        return f"PT{hours}H"
-    return f"PT{rest}M"
+    return "PT" + (f"{hours}H" if hours else "") + (f"{rest}M" if rest or not hours else "")
 
 
 def hours_from_iso(duration):
@@ -277,8 +242,11 @@ def plain(text):
 
 
 def project_members(token, project_id):
-    path = with_filters("/api/v3/principals", [{"member": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
-    return elements(request("GET", path, token))
+    """Los miembros del proyecto con su nombre, su enlace y sus roles."""
+    path = with_filters("/api/v3/memberships", [{"project": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
+    return [{"name": m["_links"]["principal"]["title"], "href": m["_links"]["principal"]["href"],
+             "roles": [role.get("title") for role in m["_links"].get("roles", [])]}
+            for m in elements(request("GET", path, token))]
 
 
 def find_member(members, text):
@@ -296,16 +264,16 @@ def list_members(wanted):
     project = find_project(token, wanted)
     print(f"{project['name']}\n")
     for member in project_members(token, project["id"]):
-        print(f"  {member['id']:<5} {member['name']}")
+        print(f"  {member['href'].rsplit('/', 1)[-1]:<5} {member['name']}")
     return 0
 
 
 def find_by_name(token, path, name, what):
-    for item in elements(request("GET", path, token)):
+    items = elements(request("GET", path, token))
+    for item in items:
         if item["name"].strip().lower() == name.strip().lower():
             return item["id"]
-    names = ", ".join(item["name"] for item in elements(request("GET", path, token)))
-    raise RuntimeError(f'No existe {what} "{name}". Opciones: {names}')
+    raise RuntimeError(f'No existe {what} "{name}". Opciones: {", ".join(item["name"] for item in items)}')
 
 
 def patch_work_package(token, work_package, **fields):
@@ -336,10 +304,6 @@ def already_noted(token, work_package_id, tag):
         return True
     path = with_filters("/api/v3/time_entries", [{"entity_id": {"operator": "=", "values": [str(work_package_id)]}}], pageSize=500)
     return any(tag in ((e.get("comment") or {}).get("raw") or "") for e in elements(request("GET", path, token)))
-
-
-def add_comment(token, work_package_id, text):
-    return request("POST", f"/api/v3/work_packages/{work_package_id}/activities", token, {"comment": {"raw": text}})
 
 
 def my_tasks(wanted):
@@ -561,19 +525,13 @@ def team_hours(wanted, since=None):
     print(f"  {'persona':<32} horas  dias  ultimo dia")
     for who, (total, days) in sorted(people.items(), key=lambda item: -item[1][0]):
         print(f"  {who[:32]:<32} {total:5.2f}  {len(days):>4}  {max(days)}")
-    missing = sorted(set(developers(token, project_id)) - set(people))
+    # Solo el rol Developer, para no contar al docente ni al ayudante; si el proyecto no lo usa, todos.
+    members = project_members(token, project_id)
+    team = [m["name"] for m in members if "Developer" in m["roles"]] or [m["name"] for m in members]
+    missing = sorted(set(team) - set(people))
     print(f"\n  Sin horas en estas fechas: {', '.join(missing) if missing else 'nadie'}")
     return 0
 
-
-def developers(token, project_id):
-    """Los miembros con rol Developer, para no contar al docente ni al ayudante. Si el proyecto no usa
-    ese rol, todos los miembros."""
-    path = with_filters("/api/v3/memberships", [{"project": {"operator": "=", "values": [str(project_id)]}}], pageSize=200)
-    memberships = elements(request("GET", path, token))
-    names = [m["_links"]["principal"]["title"] for m in memberships
-             if any(role.get("title") == "Developer" for role in m["_links"].get("roles", []))]
-    return names or [m["_links"]["principal"]["title"] for m in memberships]
 
 
 def task_in_project(token, wp_id, project_id):
@@ -602,7 +560,7 @@ def resolve_links(token, project_id, sprint=None, status=None, priority=None, as
         shown["prioridad"] = priority
     if assignee_text:
         member = find_member(project_members(token, project_id), assignee_text)
-        links["assignee"] = {"href": member["_links"]["self"]["href"]}
+        links["assignee"] = {"href": member["href"]}
         shown["asignada a"] = member["name"]
     if parent:
         mother = task_in_project(token, parent, project_id)
@@ -666,7 +624,7 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
         log_time(token, work_package, round(hours * 60), spent_on, time_comment or comment)
         print(f"  horas registradas: {hours} el {spent_on}")
     if comment:
-        add_comment(token, wp_id, comment)
+        request("POST", f"/api/v3/work_packages/{wp_id}/activities", token, {"comment": {"raw": comment}})
         print("  comentario agregado")
     return 0
 
@@ -740,7 +698,7 @@ def show_task(wanted, wp_id):
                   f"{points_text(hours_from_iso(child.get('estimatedTime'))):>4} h  {child['subject'][:60]}")
     for pull in elements(request("GET", f"/api/v3/work_packages/{wp_id}/github_pull_requests", token)):
         print(f"\nPR: {pull.get('title')} ({pull.get('state')}) {pull.get('htmlUrl') or ''}")
-    names = {m["_links"]["self"]["href"]: m["name"] for m in project_members(token, project_id)}
+    names = {m["href"]: m["name"] for m in project_members(token, project_id)}
     comments = [a for a in elements(request("GET", f"/api/v3/work_packages/{wp_id}/activities", token))
                 if ((a.get("comment") or {}).get("raw") or "").strip()
                 and not AUTO_NOTE.match(a["comment"]["raw"].strip())]
@@ -848,12 +806,11 @@ def split_points(points, weights):
     """Puntos por tarea en pasos de 0,5, o de 0,25 si con medios puntos no sale un reparto parejo.
     Cada tarea con peso recibe al menos un paso. Devuelve los puntos y el paso."""
     positive = sum(1 for w in weights if w > 0)
-    for step in (0.5, 0.25):
-        units = round(points / step)
-        if positive <= units:
-            got = apportion(units, weights, at_least_one=True, strict=True)
-            if got is not None:
-                return [u * step for u in got], step
+    if positive <= points * 2:
+        halves = apportion(round(points * 2), weights, at_least_one=True, strict=True)
+        if halves is not None:
+            return [h / 2 for h in halves], 0.5
+    # Con cuartos, apportion prueba primero el reparto parejo y solo si no existe desempata.
     if positive > points * 4:
         raise RuntimeError(f"{positive} tareas no caben en {points} puntos: cada una necesita al menos un cuarto. "
                            "Sube --total o deja fuera alguna con --peso ID=0.")
@@ -891,10 +848,6 @@ def with_points_block(description, block):
     return f"{description[:old.start()]}{table}\n{after}"
 
 
-def story_tasks(token, project_id, story_id):
-    return sorted(project_tasks(token, project_id, [{"parent": {"operator": "=", "values": [str(story_id)]}}]),
-                  key=lambda task: task["id"])
-
 
 def task_weights(story_id, tasks, weights):
     """Las horas de cada tarea: las de --peso o, si no, las estimadas en GesPro."""
@@ -925,7 +878,7 @@ def story_points(wanted, story_id, total=None, weights=None, dry_run=False):
     points = total or story.get("storyPoints")
     if not points:
         raise RuntimeError(f"#{story_id} no tiene puntos de historia. Daselos con --total, por ejemplo --total 5.")
-    tasks = story_tasks(token, project_id, story_id)
+    tasks = project_tasks(token, project_id, [{"parent": {"operator": "=", "values": [str(story_id)]}}])
     if not tasks:
         raise RuntimeError(f"#{story_id} no tiene tareas. Mete una con --wp ID --padre {story_id}.")
     hours = task_weights(story_id, tasks, weights)
@@ -997,13 +950,33 @@ def require_token():
     return token
 
 
-def error_of(call, *args):
-    """El mensaje del RuntimeError que lanza la llamada; falla si no lanza ninguno."""
+def error_of(call, *args, error=RuntimeError):
+    """El mensaje del error que lanza la llamada; falla si no lanza ninguno."""
     try:
         call(*args)
-    except RuntimeError as error:
-        return str(error)
-    raise AssertionError(f"{call.__name__} no fallo")
+    except error as raised:
+        return str(raised)
+    raise AssertionError(f"{call.__name__} acepto {args}")
+
+
+def fake_api(pages, writes, reply=lambda method, payload: {}):
+    """request y require_token falsos para --check. Un GET responde con pages[ruta sin la consulta], o
+    llama a la funcion que haya ahi con la ruta completa; lo demas se anota en writes."""
+    from unittest import mock
+
+    def fake_request(method, path, token, payload=None):
+        if method == "GET":
+            page = pages[path.split("?")[0]]
+            return page(urllib.parse.unquote(path)) if callable(page) else page
+        writes.append((method, path, payload))
+        return reply(method, payload)
+
+    return mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x")
+
+
+def member(user_id, name, role="Developer"):
+    """Una membresia como la devuelve /memberships, para --check."""
+    return {"_links": {"principal": {"title": name, "href": f"/api/v3/users/{user_id}"}, "roles": [{"title": role}]}}
 
 
 def check_api_flows():
@@ -1019,20 +992,12 @@ def check_api_flows():
         "/api/v3/statuses": {"_embedded": {"elements": [{"id": 2, "name": "In progress"}]}},
         "/api/v3/projects/7/versions": {"_embedded": {"elements": [{"id": 5, "name": "Sprint 2"}]}},
     }
-    patches = []
-
-    def fake_request(method, path, token, payload=None):
-        if method == "PATCH":
-            patches.append(payload)
-            return {**work_package, "percentageDone": payload.get("percentageDone")}
-        return pages[path]
-
+    writes = []
     # Todos los campos van en un PATCH, para que la tarea no quede a medio cambiar.
-    with mock.patch.multiple(here, request=fake_request, require_token=lambda: "x"), \
-            contextlib.redirect_stdout(io.StringIO()):
+    with fake_api(pages, writes), contextlib.redirect_stdout(io.StringIO()):
         update_work_package("demo", 620, sprint="Sprint 2", status="In progress", percent=50)
-    assert len(patches) == 1 and patches[0]["percentageDone"] == 50
-    assert set(patches[0]["_links"]) == {"version", "status"}
+    assert len(writes) == 1 and writes[0][2]["percentageDone"] == 50
+    assert set(writes[0][2]["_links"]) == {"version", "status"}
 
     for code, expected in ((404, "no ve el proyecto"), (403, "no ve el proyecto"), (401, "HTTP 401")):
         failure = RuntimeError(f"GET /api/v3/projects/demo -> HTTP {code}: ...")
@@ -1061,20 +1026,20 @@ def check_new_commands():
     """--crear, --editar-horas y --borrar-horas, con respuestas fijas en vez de la red."""
     from unittest import mock
 
-    def person(user_id, name):
-        return {"id": user_id, "name": name, "_links": {"self": {"href": f"/api/v3/users/{user_id}"}}}
-
     def entry(user_id, project_id=7):
         return {"id": 372, "spentOn": "2026-09-29", "hours": "PT2H", "comment": {"raw": "Carrito"},
                 "_links": {"user": {"href": f"/api/v3/users/{user_id}"}, "project": {"href": f"/api/v3/projects/{project_id}"},
                            "entity": {"href": "/api/v3/work_packages/620"}}}
 
+    def reply(method, payload):
+        return {**entry(43), **(payload or {}), "subject": (payload or {}).get("subject")}
+
     pages = {
         "/api/v3/projects/demo": {"id": 7},
-        "/api/v3/users/me": person(43, "YO"),
+        "/api/v3/users/me": {"name": "YO", "_links": {"self": {"href": "/api/v3/users/43"}}},
         "/api/v3/projects/7/types": {"_embedded": {"elements": [{"id": 1, "name": "Task"}]}},
         "/api/v3/work_packages/533": {"id": 533, "subject": "Carrito", "_links": {"project": {"href": "/api/v3/projects/7"}}},
-        "/api/v3/principals": {"_embedded": {"elements": [person(8, "TOMÁS PÉREZ SOTO"), person(9, "CAMILA DÍAZ")]}},
+        "/api/v3/memberships": {"_embedded": {"elements": [member(8, "TOMÁS PÉREZ SOTO"), member(9, "CAMILA DÍAZ")]}},
         "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [
             {"id": 600, "subject": "Planning", "_links": {"assignee": {"href": "/api/v3/users/9"}}},
             {"id": 601, "subject": "Login", "_links": {"assignee": {"href": "/api/v3/users/43"}}}]}},
@@ -1083,16 +1048,9 @@ def check_new_commands():
         "/api/v3/time_entries/374": entry(43, project_id=8),
     }
     writes = []
-
-    def fake_request(method, path, token, payload=None):
-        if method == "GET":
-            return pages[path.split("?")[0]]
-        writes.append((method, path, payload))
-        return {**entry(43), **(payload or {}), "subject": (payload or {}).get("subject")}
-
     terminal = mock.Mock(**{"isatty.return_value": False})
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            mock.patch.object(sys, "stdin", terminal), contextlib.redirect_stdout(io.StringIO()):
+    with fake_api(pages, writes, reply), mock.patch.object(sys, "stdin", terminal), \
+            contextlib.redirect_stdout(io.StringIO()):
         # El mismo asunto con otra persona es otra tarea; con la misma persona, ya existe. Sin --asignar es tuya.
         create_work_package("demo", "planning", parent=533, assignee_text="tomas")
         create_work_package("demo", "Planning", assignee_text="camila")
@@ -1100,6 +1058,7 @@ def check_new_commands():
         create_work_package("demo", "Logout")
         assert [(m, p) for m, p, _ in writes] == [("POST", "/api/v3/projects/7/work_packages")] * 2
         assert set(writes[0][2]["_links"]) == {"type", "parent", "assignee"}
+        assert writes[0][2]["_links"]["assignee"] == {"href": "/api/v3/users/8"}
         assert writes[1][2]["_links"]["assignee"] == {"href": "/api/v3/users/43"}
         writes.clear()
         edit_hours("demo", 372, hours=1.5, day="2026-09-28")
@@ -1127,8 +1086,6 @@ def check_new_commands():
 
 def check_team_views():
     """--sprint-actual y --horas-equipo, con respuestas fijas en vez de la red."""
-    from unittest import mock
-
     sprints = [{"id": 1, "name": "Sprint 1", "startDate": "2026-09-09", "endDate": "2026-09-23"},
                {"id": 2, "name": "Sprint 2", "startDate": "2026-09-24", "endDate": "2026-10-06"},
                {"id": 3, "name": "Sprint 3", "startDate": "2026-10-08", "endDate": "2026-10-21"},
@@ -1150,26 +1107,20 @@ def check_team_views():
     entries = [hours(1, "2026-10-06", "PT2H"), hours(1, "2026-10-07", "PT30M"), hours(2, "2026-10-07", "PT1H")]
     assert hours_by_person(entries) == {"P1": (2.5, {"2026-10-06", "2026-10-07"}), "P2": (1.0, {"2026-10-07"})}
 
-    def fake_request(method, path, token, payload=None):
-        query = urllib.parse.unquote(path)
-        if "/versions" in path:
-            return {"_embedded": {"elements": sprints}}
-        if "/statuses" in path:
-            return {"_embedded": {"elements": [{"isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}}
-        if "/work_packages" in path:  # el sprint en curso, o lo que quedo abierto de los anteriores
-            rows = [task(10, 1, 1), task(11, 1, 7), task(12, 2, 1)] if '"*"' in query else [task(5, 2, 1)]
-            return {"_embedded": {"elements": rows}}
-        if "/time_entries" in path:
-            return {"total": 3, "_embedded": {"elements": entries}}
-        if "/memberships" in path:
-            roles = (("P1", "Developer"), ("P2", "Developer"), ("P3", "Developer"), ("P4", "Docente"))
-            return {"_embedded": {"elements": [{"_links": {"principal": {"title": name}, "roles": [{"title": role}]}}
-                                               for name, role in roles]}}
-        return {"id": 7, "_links": {"self": {"href": "/api/v3/users/1"}}}  # el proyecto y /users/me
-
+    pages = {
+        "/api/v3/projects/demo": {"id": 7},
+        "/api/v3/users/me": {"_links": {"self": {"href": "/api/v3/users/1"}}},
+        "/api/v3/projects/7/versions": {"_embedded": {"elements": sprints}},
+        "/api/v3/statuses": {"_embedded": {"elements": [{"isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}},
+        # El sprint en curso pide todos los estados ("*"); lo de sprints anteriores, solo las abiertas.
+        "/api/v3/projects/7/work_packages": lambda query: {"_embedded": {"elements": (
+            [task(10, 1, 1), task(11, 1, 7), task(12, 2, 1)] if '"*"' in query else [task(5, 2, 1)])}},
+        "/api/v3/time_entries": {"total": 3, "_embedded": {"elements": entries}},
+        "/api/v3/memberships": {"_embedded": {"elements": [member(1, "P1"), member(2, "P2"), member(3, "P3"),
+                                                           member(4, "P4", "Docente")]}},
+    }
     output = io.StringIO()
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            contextlib.redirect_stdout(output):
+    with fake_api(pages, []), contextlib.redirect_stdout(output):
         sprint_status("demo")
         team_hours("demo", "2026-10-01")
     text = output.getvalue()
@@ -1180,8 +1131,6 @@ def check_team_views():
 
 def check_story_points():
     """El reparto de --puntos y su escritura, con respuestas fijas en vez de la red."""
-    from unittest import mock
-
     parts, step = split_points(8, [9, 11, 8, 8, 18, 11, 7, 4])
     assert sum(parts) == 8 and step == 0.5 and parts[4] == 2
     assert split_points(3, [13, 12, 7]) == ([1.5, 1.0, 0.5], 0.5)
@@ -1199,11 +1148,7 @@ def check_story_points():
     assert sum(tied) == 8 and tied[0] == tied[4] == tied[5] and tied[1] == tied[2]
     assert "no caben en 1 puntos" in error_of(split_points, 1, [1] * 5)
     for bad in ("540", "x=2", "540=-1", "540=nan", "540=inf"):
-        try:
-            weight_arg(bad)
-            raise AssertionError(f"weight_arg acepto {bad}")
-        except argparse.ArgumentTypeError:
-            pass
+        error_of(weight_arg, bad, error=argparse.ArgumentTypeError)
 
     pair = [{"id": 540, "subject": "Carrito"}, {"id": 541, "subject": "Pago"}]
     first, second = points_block(pair, [1.5, 0.5], [75, 25], 0.5), points_block(pair, [1.25, 0.75], [62, 38], 0.25)
@@ -1231,28 +1176,21 @@ def check_story_points():
              "_links": {"project": {"href": "/api/v3/projects/7"}, "type": {"title": "User story"}}}
     pages = {"/api/v3/projects/demo": {"id": 7}, "/api/v3/work_packages/533": story,
              "/api/v3/work_packages/534": {**task(534, "PT3H"), "_links": {**story["_links"], "type": {"title": "Task"}}},
-             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [task(536, None), task(535, "PT6H", "A | B")]}}}
-    patches = []
-
-    def fake_request(method, path, token, payload=None):
-        if method == "PATCH":
-            patches.append(payload)
-        return pages[path.split("?")[0]]
-
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            contextlib.redirect_stdout(io.StringIO()):
+             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": [task(535, "PT6H", "A | B"), task(536, None)]}}}
+    writes = []
+    with fake_api(pages, writes), contextlib.redirect_stdout(io.StringIO()):
         assert "Sin horas estimadas: #536" in error_of(story_points, "demo", 533)
         assert "no estan dentro de #533" in error_of(story_points, "demo", 533, None, [(999, 2)])
         assert "solo las User story" in error_of(story_points, "demo", 534)
         story_points("demo", 533, weights=[(536, 3)], dry_run=True)
-        assert patches == []
+        assert writes == []
         story_points("demo", 533, total=3, weights=[(536, 3)])
-    assert patches[0]["storyPoints"] == 3 and patches[0]["lockVersion"] == 2
-    raw = patches[0]["description"]["raw"]
-    assert raw.startswith("Texto.\n\n**Puntos por tarea**") and "| #535 A / B | 2 | 67% |" in raw and "| #536 Tarea | 1 | 33% |" in raw
-    story["storyPoints"] = None
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"):
+        story["storyPoints"] = None
         assert "--total" in error_of(story_points, "demo", 533)
+    payload = writes[0][2]
+    assert payload["storyPoints"] == 3 and payload["lockVersion"] == 2
+    raw = payload["description"]["raw"]
+    assert raw.startswith("Texto.\n\n**Puntos por tarea**") and "| #535 A / B | 2 | 67% |" in raw and "| #536 Tarea | 1 | 33% |" in raw
 
 
 def check_more_commands():
@@ -1261,11 +1199,7 @@ def check_more_commands():
 
     assert day_arg("2099-01-01") == "2099-01-01" and estimate_arg("40") == 40 and estimate_arg("1,5") == 1.5
     for bad in ("0", "-1", "nan", "inf", "0,005"):
-        try:
-            estimate_arg(bad)
-            raise AssertionError(f"estimate_arg acepto {bad}")
-        except argparse.ArgumentTypeError:
-            pass
+        error_of(estimate_arg, bad, error=argparse.ArgumentTypeError)
     assert "queda despues" in error_of(value_fields, None, None, "2026-10-14", "2026-10-09")
 
     me_link = {"href": "/api/v3/users/43"}
@@ -1281,7 +1215,7 @@ def check_more_commands():
         "/api/v3/projects/7/work_packages": {"total": 1, "_embedded": {"elements": [task]}},
         "/api/v3/work_packages/620/github_pull_requests": {"_embedded": {"elements": [
             {"title": "Carrito", "state": "open", "htmlUrl": "https://github.com/ana/repo/pull/7"}]}},
-        "/api/v3/principals": {"_embedded": {"elements": [{"name": "YO", "_links": {"self": me_link}}]}},
+        "/api/v3/memberships": {"_embedded": {"elements": [member(43, "YO")]}},
         "/api/v3/work_packages/620/activities": {"_embedded": {"elements": [
             {"createdAt": "2026-10-08T12:00:00Z", "comment": {"raw": "Listo el filtro."}, "_links": {"user": me_link}},
             {"createdAt": "2026-10-08T13:00:00Z", "comment": {"raw": ""}, "_links": {"user": me_link}},
@@ -1289,34 +1223,28 @@ def check_more_commands():
                                                                      "en el paquete de trabajo hijo #579_"},
              "_links": {"user": me_link}}]}},
     }
-    writes = []
 
-    def fake_request(method, path, token, payload=None):
-        if method != "GET":
-            writes.append((method, payload))
-            return {"id": 700, "subject": payload.get("subject")}
-        return pages[path.split("?")[0]]
+    def reply(method, payload):
+        return {"id": 700, "subject": payload.get("subject")}
 
-    output = io.StringIO()
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            contextlib.redirect_stdout(output):
+    writes, output = [], io.StringIO()
+    with fake_api(pages, writes, reply), contextlib.redirect_stdout(output):
         update_work_package("demo", 620, percent=50, estimate=2.5, start="2026-10-09", due="2026-10-14")
         # Sin tilde y con otra mayuscula sigue siendo la misma tarea, asi que --crear no la duplica.
         create_work_package("demo", "pagina INTEGRADORA")
         create_work_package("demo", "Carrito", estimate=4)
         search_tasks("demo", "pagina")
         show_task("demo", 620)
-    assert writes[0] == ("PATCH", {"lockVersion": 1, "percentageDone": 50, "estimatedTime": "PT2H30M",
-                                   "startDate": "2026-10-09", "dueDate": "2026-10-14"})
-    assert len(writes) == 2 and writes[1][0] == "POST" and writes[1][1]["estimatedTime"] == "PT4H"
+    assert writes[0] == ("PATCH", "/api/v3/work_packages/620", {
+        "lockVersion": 1, "percentageDone": 50, "estimatedTime": "PT2H30M", "startDate": "2026-10-09", "dueDate": "2026-10-14"})
+    assert len(writes) == 2 and writes[1][0] == "POST" and writes[1][2]["estimatedTime"] == "PT4H"
     text = output.getvalue()
     assert "Ya existe #620" in text and '1 tareas con "pagina"' in text
     assert "3 h estimadas" in text and "PR: Carrito (open)" in text and "Comentarios: 1" in text
     assert "2026-10-08 YO: Listo el filtro." in text
     # --inicio y --fin planifican, asi que aceptan fechas futuras (--fecha no).
     argv = ["gespro.py", "--proyecto", "demo", "--wp", "620", "--inicio", "2099-01-01", "--fin", "2099-01-02", "--dry-run"]
-    with mock.patch.multiple(sys.modules[__name__], request=fake_request, require_token=lambda: "x"), \
-            mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+    with fake_api(pages, writes), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
         assert main() == 0
 
 
@@ -1328,43 +1256,24 @@ def self_check():
     assert percent_arg("0") == 0 and percent_arg("100") == 100
     assert hours_arg("6,5") == 6.5
     assert date_arg("2026-09-29") == "2026-09-29"
-    for parse, bad in (
-        (percent_arg, "-1"),
-        (percent_arg, "101"),
-        (hours_arg, "0"),
-        (hours_arg, "-2"),
-        (hours_arg, "25"),
-        (hours_arg, "0,005"),
-        (date_arg, "29-09-2026"),
-        (date_arg, (datetime.date.today() + datetime.timedelta(days=1)).isoformat()),
-    ):
-        try:
-            parse(bad)
-            raise AssertionError(f"{parse.__name__} acepto {bad}")
-        except argparse.ArgumentTypeError:
-            pass
+    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    for parse, bad in ((percent_arg, "-1"), (percent_arg, "101"), (hours_arg, "0"), (hours_arg, "-2"), (hours_arg, "25"),
+                       (hours_arg, "0,005"), (date_arg, "29-09-2026"), (date_arg, tomorrow)):
+        error_of(parse, bad, error=argparse.ArgumentTypeError)
     path = with_filters("/api/v3/time_entries", [{"user_id": {"operator": "=", "values": ["me"]}}])
     assert "user_id" in urllib.parse.unquote(path)
     members = [{"name": "TOMÁS PÉREZ SOTO"}, {"name": "TAMARA ÁLVAREZ ROJAS"}, {"name": "CAMILA FERNÁNDEZ DÍAZ"}]
     assert find_member(members, "tomas")["name"].startswith("TOM")
     assert find_member(members, "Álvarez")["name"].startswith("TAM")
     for ambiguous_or_missing in ("ez", "ignacio"):
-        try:
-            find_member(members, ambiguous_or_missing)
-            raise AssertionError(f"find_member acepto {ambiguous_or_missing}")
-        except RuntimeError:
-            pass
+        error_of(find_member, members, ambiguous_or_missing)
     assert references("fix: carrito OP#533 y op#560, de nuevo OP#533") == [533, 560]
     assert references("sin referencia, ni XOP#12 ni OP#") == []
     assert hours_in("feat: algo\n\nOP#533\nHoras: 1,5\n") == 1.5 and hours_in("Hours: 2") == 2.0
     assert hours_in("dice Horas: 3 en medio de una frase") is None and hours_in("") is None
     assert hours_in("Horas: 2\xa0") == 2.0 and references("OP#0 y OP#7") == [7]
     for bad in ("Horas: 30", "Horas: 2h", "Horas: 1:30", "Horas: 1\nHoras: 2"):
-        try:
-            hours_in(bad)
-            raise AssertionError(f"hours_in acepto {bad!r}")
-        except RuntimeError:
-            pass
+        error_of(hours_in, bad)
     with contextlib.redirect_stdout(io.StringIO()):  # los avisos son esperados aca
         assert hours_from_message("feat: x OP#533\nHoras: 2", "commit") == 2.0
         assert hours_from_message("feat: x OP#533\nHoras: 2", "") == 2.0
