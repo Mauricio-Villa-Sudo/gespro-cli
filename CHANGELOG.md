@@ -2,6 +2,14 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.5.1, 9 de octubre de 2026
+
+### Corregido
+
+- La tabla de `--puntos` deja fuera el prefijo de sprint del asunto («S1 · »), que sobra porque las
+  tareas de una historia son del mismo sprint. Así, repetirlo sobre una tabla escrita sin ese prefijo
+  no cambia sus filas.
+
 ## 1.5.0, 9 de octubre de 2026
 
 ### Agregado

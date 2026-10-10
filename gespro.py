@@ -39,6 +39,9 @@ POINTS_HEADER = "**Puntos por tarea**"
 # Nota que GesPro deja sola en una historia cuando cambia una de sus tareas, en cursiva y con el numero
 # de la tarea: "_Actualizado automaticamente cambiando los valores en el paquete de trabajo hijo #579_".
 AUTO_NOTE = re.compile(r"^_[^\n]*#\d+_$")
+# Prefijo de sprint que algunos equipos ponen en el asunto ("S1 · "). En la tabla de una historia sobra,
+# porque sus tareas son del mismo sprint.
+SPRINT_PREFIX = re.compile(r"^S\d+\s*·\s*")
 # La tabla de --puntos es el encabezado y las filas que lo siguen; la frase que la explica termina con el
 # redondeo. Al repetir solo cambian esas dos cosas, porque el equipo escribe sus notas alrededor.
 # Una historia sin tareas puede tener el encabezado sin filas, con una nota debajo.
@@ -825,7 +828,8 @@ def points_block(tasks, parts, shares, step):
     rounding = "medio punto" if step == 0.5 else "un cuarto de punto"
     lines = [POINTS_HEADER, "", "| Tarea | Puntos | Abarca |", "|---|---:|---:|"]
     for task, part, share in zip(tasks, parts, shares):
-        lines.append(f"| #{task['id']} {task['subject'].replace('|', '/')} | {points_text(part)} | {share}% |")
+        subject = SPRINT_PREFIX.sub("", task["subject"]).replace("|", "/")
+        lines.append(f"| #{task['id']} {subject} | {points_text(part)} | {share}% |")
     lines += [f"| **Total** | **{points_text(sum(parts))}** | **100%** |", "",
               f"Cada tarea recibe la parte que le toca segun sus horas estimadas (columna Abarca), redondeada a {rounding}."]
     return "\n".join(lines)
@@ -1150,8 +1154,9 @@ def check_story_points():
     for bad in ("540", "x=2", "540=-1", "540=nan", "540=inf"):
         error_of(weight_arg, bad, error=argparse.ArgumentTypeError)
 
-    pair = [{"id": 540, "subject": "Carrito"}, {"id": 541, "subject": "Pago"}]
+    pair = [{"id": 540, "subject": "S2 · Carrito"}, {"id": 541, "subject": "Pago"}]
     first, second = points_block(pair, [1.5, 0.5], [75, 25], 0.5), points_block(pair, [1.25, 0.75], [62, 38], 0.25)
+    assert "| #540 Carrito | 1,5 | 75% |" in first  # sin el prefijo de sprint
     once = with_points_block("Como usuario quiero pagar.", first)
     assert once == "Como usuario quiero pagar.\n\n" + first
     # Al repetir cambian la tabla y el redondeo. Lo que el equipo escribio en la misma frase y despues queda.
