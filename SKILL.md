@@ -55,8 +55,13 @@ carpeta.
 5. `Done` solo para lo que ya está integrado en la rama principal del equipo.
 6. No cambies tareas de otra persona sin preguntar. El script lo permite y muestra a quién está
    asignada.
-7. En commits y PR, menciona la tarea como `OP#numero`. Si el commit es de una sola tarea y el
-   usuario dio las horas, agrega la línea `Horas: N`, solo con el número.
+7. Rama, commit y PR siguen el fragmento de Git de GesPro, con `OP#numero` agregado:
+   - Rama: `task/<numero>-<asunto>`, la que da GesPro en la tarea.
+   - Commit: título `[#numero] asunto`; en el cuerpo, `OP#numero` y el enlace a la tarea.
+   - PR: al final de la descripción, `GesPro: OP#numero.` y el enlace.
+
+   El script y la integración leen `OP#numero`; `[#numero]` solo no les basta. Si el commit es de una
+   sola tarea y el usuario dio las horas, agrega la línea `Horas: N`, solo con el número.
 8. Si el usuario tiene el hook de `ejemplos/post-commit`, cada commit con `OP#numero` escribe en
    GesPro. Muéstrale el mensaje del commit antes de hacerlo.
 

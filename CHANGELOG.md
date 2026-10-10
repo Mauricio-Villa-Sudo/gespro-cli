@@ -2,6 +2,14 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.7.1, 10 de octubre de 2026
+
+### Cambiado
+
+- `GUIA-AUTOMATIZACION.md`, `SKILL.md` y `ejemplos/instrucciones-ia.md`: la rama y el commit siguen el
+  fragmento de Git de GesPro (`task/<número>-<asunto>` y `[#número] asunto`), con `OP#número` y el
+  enlace a la tarea en el cuerpo. El PR termina con `GesPro: OP#número.` y el enlace.
+
 ## 1.7.0, 10 de octubre de 2026
 
 ### Agregado
