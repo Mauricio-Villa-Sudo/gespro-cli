@@ -16,6 +16,16 @@ Clona el repositorio en tu carpeta personal. La guía de automatización y los e
 git clone https://github.com/Mauricio-Villa-Sudo/gespro-cli ~/gespro-cli
 ```
 
+Si usas Claude Code, clónalo mejor en la carpeta de skills. Así Claude lo usa solo cuando le pidas
+algo de GesPro, con las reglas de `SKILL.md`:
+
+```
+git clone https://github.com/Mauricio-Villa-Sudo/gespro-cli ~/.claude/skills/gespro-cli
+```
+
+En ese caso, donde la guía y los ejemplos dicen `~/gespro-cli`, usa `~/.claude/skills/gespro-cli`.
+`gespro.env` va en esa misma carpeta.
+
 ### Tu token
 
 Cada persona usa su propio token. GesPro registra las horas a nombre del dueño del token: con el
@@ -84,6 +94,11 @@ python gespro.py --wp 620 --estimado 3 --inicio 2026-10-09 --fin 2026-10-14
 ```
 
 - Las opciones se pueden combinar en una sola llamada.
+- Si el proyecto tiene un tablero con el nombre del sprint (por ejemplo «Sprint 2»), `--status` y
+  `--sprint` también mueven la tarjeta a la columna de su estado: `New` y `Ready` a TO DO,
+  `In progress` y `Test failed` a IN PROGRESS, `Developed`, `In Review`, `In testing` y `Tested` a
+  REVIEW/QA, y `Done` y `Closed` a DONE. `On hold`, `Blocked` y `Rejected` no la mueven. Al cambiar
+  de sprint, la saca del tablero anterior. `--crear` y `--cerrar-sprint` hacen lo mismo.
 - `--padre` deja la tarea dentro de otra, por ejemplo dentro de su historia.
 - `--estimado` son las horas que crees que tomará la tarea (el campo Trabajo de GesPro). Puede pasar
   de 24 y es lo que usa `--puntos` para repartir. `--inicio` y `--fin` son las fechas de la tarea y

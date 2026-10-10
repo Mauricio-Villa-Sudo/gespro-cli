@@ -29,7 +29,7 @@ import uuid
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.6"
+USER_AGENT = "gespro-cli/1.7"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -638,11 +638,83 @@ def value_fields(percent=None, estimate=None, start=None, due=None):
     return fields, shown
 
 
+# Columna del tablero del sprint que corresponde a cada estado. Los que no estan (On hold, Blocked,
+# Rejected...) no mueven la tarjeta. Las columnas se comparan sin espacios ni simbolos.
+BOARD_COLUMNS = {
+    "new": "TODO", "ready": "TODO",
+    "in progress": "INPROGRESS", "test failed": "INPROGRESS",
+    "developed": "REVIEWQA", "in review": "REVIEWQA", "in testing": "REVIEWQA", "tested": "REVIEWQA",
+    "closed": "DONE", "done": "DONE",
+}
+BOARD_PAGE_SIZE = 250  # el maximo que acepta GesPro
+
+
+def board_key(column_name):
+    """ "REVIEW /QA" y "Review/QA" son la misma columna."""
+    return re.sub(r"[^A-Z]", "", plain(column_name).upper())
+
+
+def sync_board(token, grid, wp_id, target, dry_run):
+    """Deja la tarjeta solo en la columna target del tablero; con target None la saca de todas.
+
+    Los tableros son libres: cada columna es una consulta con orden manual y una tarea aparece solo si
+    se agrega. En /queries/{id}/order una posicion la agrega y -1 la saca. Dice si encontro la columna.
+    """
+    found = False
+    for widget in grid.get("widgets", []):
+        query_id = widget.get("options", {}).get("queryId")
+        if widget.get("identifier") != "work_package_query" or not query_id:
+            continue
+        query = request("GET", f"/api/v3/queries/{query_id}?pageSize={BOARD_PAGE_SIZE}", token)
+        inside = any(item["id"] == wp_id for item in elements(query["_embedded"]["results"]))
+        wanted = target is not None and board_key(query["name"]) == target
+        found = found or wanted
+        if wanted == inside:
+            continue
+        verb = "agrega a" if wanted else "saca de"
+        where = f'la columna "{query["name"]}" de "{grid["name"]}"'
+        if dry_run:
+            print(f"  (simulacion) la {verb} {where}")
+            continue
+        request("PATCH", f"/api/v3/queries/{query_id}/order", token, {"delta": {str(wp_id): 0 if wanted else -1}})
+        print(f"  tablero: la {verb} {where}")
+    return found
+
+
+def move_on_board(token, project, wp_id, old_sprint, sprint, status, dry_run=False):
+    """Deja la tarjeta en la columna de su estado, en el tablero con el nombre de su sprint, y la saca
+    del tablero del sprint anterior. Si falla, avisa sin cortar el comando: repetirlo termina de ordenar,
+    porque las columnas que ya estan bien no se tocan."""
+    try:
+        scope = f"/projects/{project.get('identifier') or project['id']}/boards"
+        grids = elements(request("GET", with_filters("/api/v3/grids", [{"scope": {"operator": "=", "values": [scope]}}]), token))
+        by_name = {plain(item.get("name", "")): item for item in grids}
+        if old_sprint and plain(old_sprint) != plain(sprint or "") and plain(old_sprint) in by_name:
+            sync_board(token, by_name[plain(old_sprint)], wp_id, None, dry_run)
+        target = BOARD_COLUMNS.get((status or "").strip().lower())
+        grid = by_name.get(plain(sprint or ""))
+        if not grid or not target:
+            return
+        if not sync_board(token, grid, wp_id, target, dry_run):
+            print(f'  tablero: "{grid["name"]}" no tiene columna para el estado {status}')
+    except RuntimeError as error:
+        print(f"  tablero: no se pudo mover ({error}). Repite el comando para terminar.")
+
+
+def place_after_update(token, project, work_package, sprint, status, dry_run=False):
+    """Mueve la tarjeta segun el sprint y el estado nuevos; lo que no cambia sale de la tarea."""
+    links = work_package["_links"]
+    old_sprint = (links.get("version") or {}).get("title")
+    current_status = (links.get("status") or {}).get("title")
+    move_on_board(token, project, work_package["id"], old_sprint, sprint or old_sprint, status or current_status, dry_run)
+
+
 def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, hours=None, day=None, comment=None,
                         priority=None, assignee_text=None, parent=None, estimate=None, start=None, due=None,
                         dry_run=False, time_comment=None, tag=None):
     token = require_token()
-    project_id = find_project(token, wanted)["id"]
+    project = find_project(token, wanted)
+    project_id = project["id"]
     work_package = task_in_project(token, wp_id, project_id)
     assignee = (work_package["_links"].get("assignee") or {}).get("title") or "sin asignar"
     print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee}, prioridad {work_package['_links']['priority']['title']})")
@@ -664,6 +736,8 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
             print(f"  (simulacion) pondria comentario: {comment}")
         if hours:
             print(f"  (simulacion) registraria {hours} h el {spent_on}")
+        if sprint or status:
+            place_after_update(token, project, work_package, sprint, status, dry_run=True)
         return 0
 
     # Un solo PATCH: si GesPro rechaza un campo (un estado que tu rol no puede usar), no cambia ninguno.
@@ -671,6 +745,8 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
         patch_work_package(token, work_package, **fields)
         for label, value in shown.items():
             print(f"  {label}: {value}")
+    if sprint or status:
+        place_after_update(token, project, work_package, sprint, status)
     if hours:
         log_time(token, work_package, round(hours * 60), spent_on, time_comment or comment)
         print(f"  horas registradas: {hours} el {spent_on}")
@@ -770,7 +846,8 @@ def create_work_package(wanted, subject, kind=None, description=None, percent=No
         raise RuntimeError("La tarea necesita un asunto.")
     kind = kind or "Task"
     token = require_token()
-    project_id = find_project(token, wanted)["id"]
+    project = find_project(token, wanted)
+    project_id = project["id"]
     type_id = find_by_name(token, f"/api/v3/projects/{project_id}/types", kind, "el tipo")
     links, shown = resolve_links(token, project_id, **names)
     if "assignee" not in links:
@@ -794,6 +871,9 @@ def create_work_package(wanted, subject, kind=None, description=None, percent=No
         print(f"#{created['id']} creada: {created['subject']}")
     for label, value in shown.items():
         print(f"  {label}: {value}")
+    if not dry_run and "version" in links:
+        made = created["_links"]
+        move_on_board(token, project, created["id"], None, made["version"]["title"], made["status"]["title"])
     return 0
 
 
@@ -1122,7 +1202,8 @@ def close_sprint(wanted, closing, target, dry_run=False):
     if not target:
         raise RuntimeError('Dime a que sprint pasarlas con --sprint, por ejemplo --sprint "Sprint 4".')
     token = require_token()
-    project_id = find_project(token, wanted)["id"]
+    project = find_project(token, wanted)
+    project_id = project["id"]
     versions = f"/api/v3/projects/{project_id}/versions"
     from_id, to_id = find_by_name(token, versions, closing, "el sprint"), find_by_name(token, versions, target, "el sprint")
     if from_id == to_id:
@@ -1141,6 +1222,7 @@ def close_sprint(wanted, closing, target, dry_run=False):
         try:
             patch_work_package(token, task, _links={"version": {"href": f"/api/v3/versions/{to_id}"}})
             print(line)
+            move_on_board(token, project, task["id"], closing, target, task["_links"]["status"].get("title"))
         except RuntimeError as error:
             print(f"{line}  Error: {error}")
             failed += 1
@@ -1385,19 +1467,37 @@ def check_api_flows():
 
     here = sys.modules[__name__]
     work_package = {"id": 620, "lockVersion": 3, "subject": "Carrito",
-                    "_links": {"project": {"href": "/api/v3/projects/7"}, "priority": {"title": "Normal"}}}
+                    "_links": {"project": {"href": "/api/v3/projects/7"}, "priority": {"title": "Normal"},
+                               "version": {"title": "Sprint 1"}, "status": {"title": "New"}}}
+
+    def board(name, *query_ids):
+        widgets = [{"identifier": "work_package_query", "options": {"queryId": query_id}} for query_id in query_ids]
+        return {"name": name, "widgets": widgets}
+
+    def column(path):
+        query_id = int(path.split("/")[4].split("?")[0])
+        name, cards = {11: ("TO DO", [620]), 21: ("IN PROGRESS", []), 22: ("DONE", [])}[query_id]
+        return {"name": name, "_embedded": {"results": {"_embedded": {"elements": [{"id": c} for c in cards]}}}}
+
+    grids = [board("Sprint 1", 11), board("Sprint 2", 21, 22)]
     pages = {
         "/api/v3/projects/demo": {"id": 7},
         "/api/v3/work_packages/620": work_package,
         "/api/v3/statuses": {"_embedded": {"elements": [{"id": 2, "name": "In progress"}]}},
         "/api/v3/projects/7/versions": {"_embedded": {"elements": [{"id": 5, "name": "Sprint 2"}]}},
+        "/api/v3/grids": {"_embedded": {"elements": grids}},
+        "/api/v3/queries/11": column, "/api/v3/queries/21": column, "/api/v3/queries/22": column,
     }
     writes = []
     # Todos los campos van en un PATCH, para que la tarea no quede a medio cambiar.
     with fake_api(pages, writes), contextlib.redirect_stdout(io.StringIO()):
         update_work_package("demo", 620, sprint="Sprint 2", status="In progress", percent=50)
-    assert len(writes) == 1 and writes[0][2]["percentageDone"] == 50
+    assert writes[0][2]["percentageDone"] == 50
     assert set(writes[0][2]["_links"]) == {"version", "status"}
+    # La tarjeta sale del tablero del Sprint 1 y entra solo a IN PROGRESS del Sprint 2; DONE no se toca.
+    assert writes[1:] == [("PATCH", "/api/v3/queries/11/order", {"delta": {"620": -1}}),
+                          ("PATCH", "/api/v3/queries/21/order", {"delta": {"620": 0}})]
+    assert board_key("REVIEW /QA") == board_key("Review/QA") == BOARD_COLUMNS["in review"]
 
     for code, expected in ((404, "no ve el proyecto"), (403, "no ve el proyecto"), (401, "HTTP 401")):
         failure = RuntimeError(f"GET /api/v3/projects/demo -> HTTP {code}: ...")
@@ -1705,6 +1805,7 @@ def check_planning():
              "_links": {"user": {"title": "YO"}, "entity": {"href": "/api/v3/work_packages/10", "title": "Tarea 10"}}}
     pages = {
         "/api/v3/projects/demo": {"id": 7, "name": "Demo"},
+        "/api/v3/grids": {"_embedded": {"elements": []}},
         "/api/v3/users/me": {"name": "YO", "_links": {"self": me_link}},
         "/api/v3/statuses": {"_embedded": {"elements": [
             {"id": 7, "name": "Done", "isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}},
