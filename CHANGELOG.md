@@ -2,6 +2,17 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.7.0, 10 de octubre de 2026
+
+### Agregado
+
+- `SKILL.md`: clonado en `~/.claude/skills/gespro-cli`, el repositorio funciona como skill de Claude
+  Code, con los comandos y las reglas de `ejemplos/instrucciones-ia.md`.
+- Tableros de sprint: `--wp` con `--status` o `--sprint`, `--crear` y `--cerrar-sprint` dejan la
+  tarjeta en la columna de su estado, en el tablero con el nombre de su sprint, y la sacan del tablero
+  del sprint anterior. En GesPro una tarea no aparece sola en el tablero por tener sprint y estado. Si
+  el tablero falla, el resto del cambio se registra igual y repetir el comando lo termina de ordenar.
+
 ## 1.6.0, 9 de octubre de 2026
 
 ### Agregado
