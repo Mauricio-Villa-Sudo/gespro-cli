@@ -214,6 +214,8 @@ python gespro.py --horas-equipo --desde 2026-09-28 --formato csv > horas.csv
 python gespro.py --report --formato json
 ```
 
+El CSV lleva BOM, así que Excel lee bien las tildes al abrirlo.
+
 ### Revisar el proyecto antes de la entrega
 
 ```

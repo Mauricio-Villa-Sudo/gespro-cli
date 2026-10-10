@@ -364,6 +364,9 @@ def emit(rows, fmt, fields):
     if fmt == "json":
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return 0
+    # Excel abre un CSV sin BOM como si fuera ANSI y rompe las tildes. En la terminal no hace falta.
+    if not sys.stdout.isatty():
+        sys.stdout.write("﻿")
     writer = csv.DictWriter(sys.stdout, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
@@ -1694,7 +1697,7 @@ def check_planning():
     with contextlib.redirect_stdout(output):
         emit([{"a": 1, "b": "x,y"}], "csv", ["a", "b"])
         emit([{"a": "ñ"}], "json", ["a"])
-    assert output.getvalue() == 'a,b\n1,"x,y"\n[\n  {\n    "a": "ñ"\n  }\n]\n'
+    assert output.getvalue() == '﻿a,b\n1,"x,y"\n[\n  {\n    "a": "ñ"\n  }\n]\n'
 
     me_link = {"href": "/api/v3/users/43"}
     sprint_tasks = [task(10), task(11, status=7), task(12, "User story")]
@@ -1862,6 +1865,9 @@ def main():
                         help="con --report, --mis-horas o --horas-equipo: salida en JSON o CSV")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
+    # En Windows, lo que sale a un archivo o a otro programa iria en cp1252 y romperia las tildes.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
     try:
         if args.check:

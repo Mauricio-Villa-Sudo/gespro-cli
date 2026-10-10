@@ -25,6 +25,11 @@ Los cambios de cada versión, del más nuevo al más antiguo.
 - Los avisos de «muestro N de M» salen por la salida de error, para no mezclarse con el JSON o el CSV.
 - La guía de automatización avisa que quien puede hacer push puede leer el secreto del workflow.
 
+### Corregido
+
+- En Windows, las tildes salían rotas («Ã­» o «�») cuando la salida iba a un archivo o a otro
+  programa. Ahora sale siempre en UTF-8.
+
 ## 1.5.1, 9 de octubre de 2026
 
 ### Corregido
