@@ -2,6 +2,34 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.6.0, 9 de octubre de 2026
+
+### Agregado
+
+- `--revisar`: tareas sin padre, sin asignar, sin estimado o sin sprint, historias sin puntos y tareas
+  cerradas sin horas.
+- `--atrasadas`: tareas abiertas con la fecha de término vencida, por persona.
+- `--burndown`: las horas que faltan en el sprint, día a día, con la línea del ritmo parejo.
+- `--daily`: el texto del standup con tus horas del día hábil anterior y tus tareas abiertas.
+- `--cerrar-sprint`: pasa las tareas abiertas de un sprint al de `--sprint`.
+- `--crear-desde`: crea una tarea por cada fila de un CSV y revisa el archivo entero antes de crear la
+  primera.
+- `--relacionar` con `--con` y `--como`: relaciones entre tareas (bloquea, precede, sigue...).
+- `--adjuntar`: sube un archivo a una tarea.
+- `--iniciar` y `--parar`: cronómetro que registra las horas al detenerlo.
+- `--formato json` o `--formato csv` en `--report`, `--mis-horas` y `--horas-equipo`.
+- CI en GitHub Actions que corre `--check` con Python 3.9 y 3.12 en cada PR.
+
+### Cambiado
+
+- Los avisos de «muestro N de M» salen por la salida de error, para no mezclarse con el JSON o el CSV.
+- La guía de automatización avisa que quien puede hacer push puede leer el secreto del workflow.
+
+### Corregido
+
+- En Windows, las tildes salían rotas («Ã­» o «�») cuando la salida iba a un archivo o a otro
+  programa. Ahora sale siempre en UTF-8.
+
 ## 1.5.1, 9 de octubre de 2026
 
 ### Corregido
