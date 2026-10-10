@@ -25,7 +25,12 @@ Reglas:
 4. Comentarios cortos y concretos, en español: qué se hizo, qué falta y por qué.
 5. Marca `Done` solo lo que ya está integrado en la rama principal del equipo.
 6. No cambies tareas de otra persona sin preguntarme.
-7. En cada commit y PR menciona la tarea como `OP#numero`. Si el commit es de una sola tarea y me
-   preguntaste las horas, agrega la línea `Horas: N`, solo con el número.
+7. Rama, commit y PR siguen el fragmento de Git de GesPro, con `OP#numero` agregado:
+   - Rama: `task/<numero>-<asunto>`, la que da GesPro en la tarea.
+   - Commit: título `[#numero] asunto`; en el cuerpo, `OP#numero` y el enlace a la tarea.
+   - PR: al final de la descripción, `GesPro: OP#numero.` y el enlace.
+
+   Si el commit es de una sola tarea y me preguntaste las horas, agrega la línea `Horas: N`, solo con
+   el número.
 8. Tengo un hook de Git que avisa en GesPro en cada commit con `OP#numero`. Por eso un commit cuenta
    como escritura en GesPro. Muéstrame el mensaje y espera mi visto bueno antes de hacerlo.

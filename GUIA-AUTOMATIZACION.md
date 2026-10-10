@@ -12,17 +12,31 @@ niveles. Cada uno sirve solo, y se pueden combinar.
 
 ## 1. Mencionar la tarea con OP#número
 
-Escribe el número de la tarea así, en el mensaje del commit o en el título o la descripción del PR:
+En cada tarea, GesPro ofrece un «Fragmento de código de Git» con el nombre de la rama y un mensaje de
+commit. Úsalo y agrégale `OP#número`:
 
 ```
-feat(carrito): recalcular el total al quitar un ítem
+git checkout -b task/621-recalculo-del-total-al-agregar-o-quitar-un-item
+```
+
+```
+[#621] Recalcular el total al quitar un ítem
 
 OP#621
+https://gespro.devhub.cl/work_packages/621
 Horas: 1,5
 ```
 
-- `OP#621` es el formato que usa la integración oficial de OpenProject con GitHub, así que sirve también
-  para el nivel 4.
+Y al final de la descripción del PR:
+
+```
+GesPro: OP#621.
+https://gespro.devhub.cl/work_packages/621
+```
+
+- `OP#621` es el formato que lee el script y el que usa la integración oficial de OpenProject con
+  GitHub (nivel 4). El `[#621]` del fragmento no lo reconoce ninguno de los dos; la integración enlaza
+  igual por la URL, pero el script no.
 - La línea `Horas: 1,5` es opcional. Va sola en su línea, con el número solo: `Horas: 2h` o
   `Horas: 1:30` no sirven, y el script avisa sin registrar nada. Solo cuenta cuando el commit menciona
   una sola tarea.
