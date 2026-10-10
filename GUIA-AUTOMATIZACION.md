@@ -85,6 +85,10 @@ Ten en cuenta:
   pídeselo a quien administre la organización.
 - **El token:** todo lo que haga el workflow queda a nombre del dueño del token. Lo ideal es un usuario
   de servicio. Si usas el tuyo, todos los comentarios del equipo saldrán con tu nombre.
+- **Quién puede leer el secreto:** cualquiera con permiso de push puede escribir en su rama un
+  workflow que imprima el secreto o lo mande a otro sitio. GitHub oculta el valor en los registros,
+  pero no impide eso. Entrega el token solo a repositorios donde confías en todos los que hacen push,
+  y bórralo en GesPro si alguien deja el equipo.
 - **Estados:** `In Review` existe en la instancia de la carrera, pero si tu proyecto usa otros nombres,
   cámbialo. El script muestra los estados válidos cuando uno no existe.
 - **Forks:** GitHub no entrega secretos a los PR que vienen de un fork, así que el workflow se salta

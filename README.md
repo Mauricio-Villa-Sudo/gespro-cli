@@ -206,6 +206,109 @@ Ninguno escribe nada.
   ha registrado. Solo cuenta a quienes tienen rol Developer, así que el docente y el ayudante no
   salen en esa lista.
 
+Para pegar esos datos en una planilla o un informe, agrega `--formato csv` o `--formato json` a
+`--report`, `--mis-horas` o `--horas-equipo`:
+
+```
+python gespro.py --horas-equipo --desde 2026-09-28 --formato csv > horas.csv
+python gespro.py --report --formato json
+```
+
+### Revisar el proyecto antes de la entrega
+
+```
+python gespro.py --revisar
+python gespro.py --atrasadas
+python gespro.py --burndown
+python gespro.py --burndown --sprint "Sprint 2"
+```
+
+Ninguno escribe nada.
+
+- `--revisar` lista las tareas a las que les falta algo: padre (una tarea va dentro de una historia y
+  la historia dentro de una épica), persona asignada, horas estimadas o sprint, las historias sin
+  puntos y las tareas cerradas sin horas registradas. Las épicas y las historias no necesitan
+  estimado ni persona, así que esas revisiones se las salta.
+- `--atrasadas` muestra, por persona, las tareas abiertas cuya fecha de término (`--fin`) ya pasó.
+- `--burndown` dibuja en la terminal las horas que faltan al final de cada día del sprint en curso, o
+  del que pidas con `--sprint`. La barra `|` marca dónde deberías ir si avanzaras parejo. Las horas
+  que faltan son las estimadas menos las registradas en las tareas del sprint. Las historias no
+  suman, porque sus horas son las de sus tareas. Cerrar una tarea no baja la curva; registrar horas
+  sí.
+
+### El daily
+
+```
+python gespro.py --daily
+python gespro.py --daily --fecha 2026-10-08
+```
+
+Arma el texto del standup a partir de GesPro: lo que registraste el día hábil anterior (el viernes,
+si hoy es lunes), tus tareas abiertas que ya empezaste y las que están en `On hold`. Revísalo antes de
+pegarlo: los bloqueos que no anotaste en GesPro no salen.
+
+### Cerrar un sprint
+
+```
+python gespro.py --cerrar-sprint "Sprint 3" --sprint "Sprint 4" --dry-run
+python gespro.py --cerrar-sprint "Sprint 3" --sprint "Sprint 4"
+```
+
+Pasa al sprint de `--sprint` todas las tareas que siguen abiertas en el sprint que cierras. Las
+cerradas se quedan donde están. Si una tarea falla, por ejemplo porque alguien la estaba editando,
+sigue con las demás y te dice cuál quedó atrás.
+
+### Crear varias tareas desde un CSV
+
+```
+python gespro.py --crear-desde sprint4.csv --dry-run
+python gespro.py --crear-desde sprint4.csv
+```
+
+Crea una tarea por fila, igual que `--crear`. La primera fila lleva los nombres de las columnas, que
+pueden ir en cualquier orden, con o sin tildes: `asunto` (la única obligatoria), `tipo`, `padre`,
+`asignar`, `sprint`, `estado`, `prioridad`, `estimado`, `inicio`, `fin` y `descripcion`. Sirve un CSV
+separado por comas o por punto y coma, que es como lo guarda Excel en español.
+
+```
+asunto;padre;asignar;estimado;sprint
+Pantalla de pago;533;tomas;4;Sprint 4
+Tests del pago;533;camila;2,5;Sprint 4
+```
+
+Antes de crear nada revisa el archivo completo: si una fila tiene una fecha o un número mal escrito,
+te dice cuál y no crea ninguna. Igual que `--crear`, se salta las tareas que ya existen con el mismo
+asunto y la misma persona, así que puedes volver a correrlo si se cortó a la mitad. `padre` tiene que
+ser una tarea que ya exista en GesPro, no una fila del mismo archivo.
+
+### Relacionar tareas y adjuntar archivos
+
+```
+python gespro.py --relacionar 620 --con 621 --como bloquea
+python gespro.py --relacionar 620 --con 640
+python gespro.py --adjuntar 620 captura-login.png
+```
+
+`--relacionar` deja a la vista en GesPro que una tarea depende de otra. `--como` puede ser
+`relacionada` (la que usa si no dices nada), `bloquea`, `precede`, `sigue`, `duplica`, `incluye` o
+`requiere`. Las dos tareas tienen que ser de tu proyecto.
+
+`--adjuntar` sube un archivo a la tarea: la captura de una prueba, el PDF de un informe o el acta de
+una reunión. Recibe primero el número de la tarea y después la ruta del archivo.
+
+### Cronómetro
+
+```
+python gespro.py --iniciar 620
+python gespro.py --parar --comment "Validación del formulario de pago"
+```
+
+`--iniciar` anota la hora en `~/.gespro-cronometro.json`. `--parar` calcula el tiempo, lo registra
+en la tarea con la fecha en que empezaste y borra el archivo. Corre un cronómetro a la vez. Si pasaron
+más de 24 horas, lo borra sin registrar nada, porque seguramente se te olvidó pararlo; en ese caso
+anota lo que trabajaste de verdad con `--wp`. `--parar --dry-run` muestra cuánto registraría y deja el
+cronómetro corriendo.
+
 ## 3. Buenas prácticas
 
 - Registra las horas que trabajaste de verdad, el día que las trabajaste. GesPro es la evidencia de
@@ -230,6 +333,8 @@ Ninguno escribe nada.
 | `coincide con varios` | El texto de `--asignar` calza con más de un miembro | Escribe más del nombre o el apellido |
 | `Ya existe #N` | Hay una tarea con ese asunto y esa persona asignada | Cámbiala con `--wp N` |
 | `Solo cambio los tuyos` | El registro de horas es de otra persona | Revisa el `id` en `--mis-horas` |
+| `No creo nada, el CSV tiene errores` | Una fila de `--crear-desde` no sirve | Corrige las filas que muestra y vuelve a correrlo |
+| `Ya corre el cronometro` | Quedó un `--iniciar` sin parar | Usa `--parar` primero |
 
 ## Cómo funciona
 
