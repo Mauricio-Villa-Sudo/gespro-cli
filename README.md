@@ -230,6 +230,8 @@ python gespro.py --report --formato json
 ```
 
 El CSV lleva BOM, así que Excel lee bien las tildes al abrirlo.
+Si un texto empieza con `=`, `+`, `-`, `@`, tabulación o retorno de carro, el CSV le antepone un
+apóstrofo (`'`) para que Excel lo muestre tal cual y no lo calcule como fórmula. El JSON sale sin cambios.
 
 ### Revisar el proyecto antes de la entrega
 

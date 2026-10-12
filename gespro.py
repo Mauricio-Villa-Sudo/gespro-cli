@@ -29,7 +29,7 @@ import uuid
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.7"
+USER_AGENT = "gespro-cli/1.7.2"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -369,7 +369,10 @@ def emit(rows, fmt, fields):
         sys.stdout.write("﻿")
     writer = csv.DictWriter(sys.stdout, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
-    writer.writerows(rows)
+    # Excel evalua como formula un texto que empieza con estos caracteres; el apostrofo lo deja como texto.
+    formula = ("=", "+", "-", "@", "\t", "\r")
+    writer.writerows({key: "'" + value if isinstance(value, str) and value.startswith(formula) else value
+                      for key, value in row.items()} for row in rows)
     return 0
 
 
@@ -664,6 +667,9 @@ def sync_board(token, grid, wp_id, target, dry_run):
     for widget in grid.get("widgets", []):
         query_id = widget.get("options", {}).get("queryId")
         if widget.get("identifier") != "work_package_query" or not query_id:
+            continue
+        # El queryId sale del JSON del tablero y va a la ruta: solo un entero.
+        if not (type(query_id) is int or isinstance(query_id, str) and query_id.isascii() and query_id.isdigit()):
             continue
         query = request("GET", f"/api/v3/queries/{query_id}?pageSize={BOARD_PAGE_SIZE}", token)
         inside = any(item["id"] == wp_id for item in elements(query["_embedded"]["results"]))
@@ -1798,6 +1804,17 @@ def check_planning():
         emit([{"a": 1, "b": "x,y"}], "csv", ["a", "b"])
         emit([{"a": "ñ"}], "json", ["a"])
     assert output.getvalue() == '﻿a,b\n1,"x,y"\n[\n  {\n    "a": "ñ"\n  }\n]\n'
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        emit([{"asunto": "=1+1"}], "csv", ["asunto"])
+        emit([{"asunto": "=1+1"}], "json", ["asunto"])
+    assert output.getvalue() == '﻿asunto\n\'=1+1\n[\n  {\n    "asunto": "=1+1"\n  }\n]\n'
+
+    writes = []
+    bad_board = {"name": "Sprint 1", "widgets": [{"identifier": "work_package_query", "options": {"queryId": "../x"}}]}
+    with fake_api({}, writes):
+        assert sync_board("x", bad_board, 620, "to do", False) is False
+    assert writes == []
 
     me_link = {"href": "/api/v3/users/43"}
     sprint_tasks = [task(10), task(11, status=7), task(12, "User story")]

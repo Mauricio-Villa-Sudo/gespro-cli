@@ -2,6 +2,16 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.7.2, 12 de octubre de 2026
+
+### Corregido
+
+- `--formato csv`: un texto que empieza con `=`, `+`, `-`, `@`, tabulación o retorno de carro sale con
+  un apóstrofo adelante. Antes, un asunto como `=1+1` se calculaba como fórmula al abrir el archivo en
+  Excel. El JSON no cambia.
+- Tableros: si el `queryId` de una columna no es un número, el script se salta esa columna en vez de
+  usarlo para armar la ruta de la API.
+
 ## 1.7.1, 10 de octubre de 2026
 
 ### Cambiado
