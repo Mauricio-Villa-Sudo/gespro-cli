@@ -8,7 +8,8 @@ Los cambios de cada versión, del más nuevo al más antiguo.
 
 - `--gantt`: inicio, fin, duración y dependencias de cada tarea, de todo el proyecto o filtradas con
   `--sprint` o `--padre`. Acepta `--formato csv|json`.
-- `--mover ID --dias N`: corre la tarea N días (con N negativo, la adelanta). Mantiene la duración y
+- `--mover ID --dias N`: corre la tarea N días hábiles, de lunes a viernes (con N negativo, la
+  adelanta). Si la tarea ignora los días no laborables, cuenta días corridos. Mantiene la duración y
   GesPro calcula el fin en días hábiles. Con `--cascada` mueve también las tareas que la siguen, salvo
   las de programación automática, porque a esas las mueve GesPro.
 - `--retraso N` con `--relacionar ... --como precede` o `sigue`: los días entre una tarea y la otra.

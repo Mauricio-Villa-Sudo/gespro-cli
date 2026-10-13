@@ -1351,8 +1351,20 @@ def sequence(relation):
     return None
 
 
-def shift_day(day, days):
-    return (datetime.date.fromisoformat(day) + datetime.timedelta(days=days)).isoformat() if day else None
+def shift_day(day, days, working=True):
+    """Corre la fecha N dias. Con working cuenta solo de lunes a viernes, porque GesPro rechaza una fecha en
+    fin de semana si la tarea no ignora los dias no laborables. Los feriados no se consideran."""
+    if not day:
+        return None
+    current = datetime.date.fromisoformat(day)
+    if not working:
+        return (current + datetime.timedelta(days=days)).isoformat()
+    step, remaining = (1 if days > 0 else -1), abs(days)
+    while remaining:
+        current += datetime.timedelta(days=step)
+        if current.weekday() < 5:
+            remaining -= 1
+    return current.isoformat()
 
 
 def followers(token, project_id, root):
@@ -1371,7 +1383,7 @@ def followers(token, project_id, root):
 
 
 def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
-    """Corre la tarea N dias; con cascade, tambien las que la siguen (precede). Se mueve el inicio y se
+    """Corre la tarea N dias habiles; con cascade, tambien las que la siguen (precede). Se mueve el inicio y se
     conserva la duracion, para que GesPro calcule el fin en dias habiles como en el Gantt."""
     if days == 0:
         raise RuntimeError("Mover 0 dias no cambia nada. Usa --dias con un numero distinto de 0.")
@@ -1386,18 +1398,19 @@ def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
     for task in chain:
         start, due = task.get("startDate"), task.get("dueDate")
         label = f"#{task['id']} {task['subject']}"
+        working = not task.get("ignoreNonWorkingDays")
         if not (start or due):
             print(f"{label}: sin fechas, no la muevo")
         elif task is not root and not task.get("scheduleManually"):
             print(f"{label}: programacion automatica, la mueve GesPro")
         elif start:
-            fields = {"startDate": shift_day(start, days)}
+            fields = {"startDate": shift_day(start, days, working)}
             if task.get("duration"):
                 fields["duration"] = task["duration"]
             plan.append((task, fields))
             print(f"{label}: empieza el {fields['startDate']} (antes {start})")
         else:
-            plan.append((task, {"dueDate": shift_day(due, days)}))
+            plan.append((task, {"dueDate": shift_day(due, days, working)}))
             print(f"{label}: termina el {plan[-1][1]['dueDate']} (antes {due})")
     if dry_run:
         print("(simulacion) no escribo nada")
@@ -2048,7 +2061,9 @@ def check_planning():
 
 def check_gantt():
     """--mover, --retraso, --desrelacionar, --manual/--automatica y --gantt contra la API falsa."""
-    assert shift_day("2026-10-13", -3) == "2026-10-10" and shift_day("2026-12-30", 5) == "2027-01-04"
+    # Martes menos 3 dias habiles es el jueves anterior; del miercoles 30 de diciembre, 5 saltan el fin de semana.
+    assert shift_day("2026-10-13", -3) == "2026-10-08" and shift_day("2026-12-30", 5) == "2027-01-06"
+    assert shift_day("2026-10-16", 1) == "2026-10-19" and shift_day("2026-10-13", -3, working=False) == "2026-10-10"
     assert shift_day(None, 5) is None
     error_of(day_arg, "2026-02-30", error=argparse.ArgumentTypeError)
     assert lag_arg("0") == 0 and lag_arg("3") == 3
@@ -2075,8 +2090,8 @@ def check_gantt():
         found = [r for r in relations if {wp_id_of(r["_links"]["from"]), wp_id_of(r["_links"]["to"])} & wanted]
         return {"total": len(found), "_embedded": {"elements": found}}
 
-    tasks = {20: task(20, "2026-10-13", "2026-10-15"), 21: task(21, "2026-10-17", "2026-10-20"),
-             22: task(22, "2026-10-21", "2026-10-22"), 23: task(23), 24: task(24, "2026-10-01", "2026-10-02"),
+    tasks = {20: task(20, "2026-10-13", "2026-10-15"), 21: task(21, "2026-10-19", "2026-10-21"),
+             22: task(22, "2026-10-22", "2026-10-23"), 23: task(23), 24: task(24, "2026-10-01", "2026-10-02"),
              25: task(25, due="2026-10-05")}
     pages = {"/api/v3/projects/demo": {"id": 7, "name": "Demo"}, "/api/v3/relations": involved,
              "/api/v3/projects/7/work_packages": {"_embedded": {"elements": list(tasks.values())}},
@@ -2085,14 +2100,14 @@ def check_gantt():
     writes, output = [], io.StringIO()
     with fake_api(pages, writes), contextlib.redirect_stdout(output):
         move_task("demo", 20, 2, cascade=True)
-        assert [dates(w) for w in writes] == [("20", "2026-10-15"), ("21", "2026-10-19"), ("22", "2026-10-23")]
+        assert [dates(w) for w in writes] == [("20", "2026-10-15"), ("21", "2026-10-21"), ("22", "2026-10-26")]
         assert writes[0][2] == {"lockVersion": 1, "startDate": "2026-10-15", "duration": "P3D"}
         writes.clear()
         move_task("demo", 20, -3)
-        assert [dates(w) for w in writes] == [("20", "2026-10-10")]
+        assert [dates(w) for w in writes] == [("20", "2026-10-08")]
         writes.clear()
-        move_task("demo", 25, -1)  # solo tiene fin
-        assert writes[0][2] == {"lockVersion": 1, "dueDate": "2026-10-04"}
+        move_task("demo", 25, -1)  # solo tiene fin, un lunes: queda el viernes
+        assert writes[0][2] == {"lockVersion": 1, "dueDate": "2026-10-02"}
         writes.clear()
         move_task("demo", 20, 2, cascade=True, dry_run=True)
         assert writes == []
@@ -2115,20 +2130,27 @@ def check_gantt():
         gantt("demo", fmt="json")
         rows = json.loads(output.getvalue())
         assert [r["id"] for r in rows] == [24, 20, 21, 22, 23, 25]  # por inicio; sin fechas al final
-        assert rows[2] == {"id": 21, "asunto": "Tarea 21", "inicio": "2026-10-17", "fin": "2026-10-20",
+        assert rows[2] == {"id": 21, "asunto": "Tarea 21", "inicio": "2026-10-19", "fin": "2026-10-21",
                            "dias": 3, "despues de": "#20 +1"}
         assert rows[3]["despues de"] == "#21" and rows[1]["despues de"] == ""
 
     # Una sucesora con programacion automatica la corre GesPro; la que viene despues de ella, si es manual, no.
-    auto = task(21, "2026-10-17", "2026-10-20", scheduleManually=False)
+    auto = task(21, "2026-10-19", "2026-10-21", scheduleManually=False)
     writes = []
     with fake_api({**pages, "/api/v3/work_packages/21": auto}, writes), contextlib.redirect_stdout(io.StringIO()):
         move_task("demo", 20, 2, cascade=True)
     assert [dates(w)[0] for w in writes] == ["20", "22"]
 
+    # Si la tarea ignora los dias no laborables, como en GesPro, se corre en dias corridos.
+    weekend = task(20, "2026-10-16", "2026-10-18", ignoreNonWorkingDays=True)
+    writes = []
+    with fake_api({**pages, "/api/v3/work_packages/20": weekend}, writes), contextlib.redirect_stdout(io.StringIO()):
+        move_task("demo", 20, 1)
+    assert [dates(w) for w in writes] == [("20", "2026-10-17")]
+
     # Un 403 o 422 a mitad de la cascada dice que tareas ya quedaron movidas.
     def refuse(method, payload):
-        if (payload or {}).get("startDate") == "2026-10-19":
+        if (payload or {}).get("startDate") == "2026-10-21":
             raise RuntimeError("PATCH /api/v3/work_packages/21 -> HTTP 403: sin permiso")
         if (payload or {}).get("lag") == 9:
             raise RuntimeError("POST /api/v3/relations -> HTTP 422: ciclo")
@@ -2246,7 +2268,7 @@ def main():
                         help="con --relacionar: tipo de relacion (por defecto, relacionada)")
     parser.add_argument("--retraso", type=lag_arg, metavar="DIAS",
                         help="con --relacionar y --como precede o sigue: dias entre una tarea y la otra")
-    parser.add_argument("--dias", type=int, metavar="N", help="con --mover: dias a correr la tarea (negativo, hacia atras)")
+    parser.add_argument("--dias", type=int, metavar="N", help="con --mover: dias habiles a correr la tarea (negativo, hacia atras)")
     parser.add_argument("--cascada", action="store_true", help="con --mover: corre tambien las tareas que la siguen")
     parser.add_argument("--formato", choices=("json", "csv"),
                         help="con --report, --mis-horas, --horas-equipo o --gantt: salida en JSON o CSV")

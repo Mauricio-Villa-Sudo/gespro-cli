@@ -334,7 +334,9 @@ está dentro de una historia. También acepta `--formato csv` o `--formato json`
 `--retraso` va con `--como precede` o `--como sigue` y fija cuántos días deja GesPro entre las dos
 tareas.
 
-`--mover` corre la tarea los días que digas en `--dias`. Con un número negativo, la adelanta. Cambia
+`--mover` corre la tarea los días hábiles que digas en `--dias`, contando de lunes a viernes, porque
+GesPro no acepta una fecha en fin de semana. Si la tarea ignora los días no laborables, cuenta días
+corridos. Los feriados no los descuenta. Con un número negativo, la adelanta. Cambia
 el inicio y deja la duración igual, así que GesPro calcula el fin saltándose los fines de semana,
 como cuando arrastras la barra en el Gantt. Con `--cascada` corre también las tareas que vienen
 después, siguiendo las relaciones `precede` hasta el final de la cadena. Si una de esas tareas tiene
