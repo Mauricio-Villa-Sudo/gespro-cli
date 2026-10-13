@@ -39,6 +39,10 @@ Para escribir:
 - `--cerrar-sprint S --sprint S2`, `--relacionar N --con M [--como bloquea]`, `--adjuntar N archivo`
 - `--mover N --dias D [--cascada]`, `--relacionar N --con M --como precede --retraso D`,
   `--desrelacionar N --con M`, `--manual N`, `--automatica N`
+
+  `--dias` cuenta días hábiles según el calendario de GesPro, con fines de semana y feriados. Si
+  `--mover` escribe un aviso, por ejemplo que la tarea es automática y tiene predecesoras, muéstraselo
+  al usuario junto con el `--dry-run` antes de seguir.
 - `--iniciar N`, `--parar [--comment ...]`
 
 `--proyecto identificador` cambia de proyecto en una sola llamada. Los detalles de cada comando están
