@@ -334,15 +334,17 @@ está dentro de una historia. También acepta `--formato csv` o `--formato json`
 `--retraso` va con `--como precede` o `--como sigue` y fija cuántos días deja GesPro entre las dos
 tareas.
 
-`--mover` corre la tarea los días hábiles que digas en `--dias`, contando de lunes a viernes, porque
-GesPro no acepta una fecha en fin de semana. Si la tarea ignora los días no laborables, cuenta días
-corridos. Los feriados no los descuenta. Con un número negativo, la adelanta. Cambia
-el inicio y deja la duración igual, así que GesPro calcula el fin saltándose los fines de semana,
-como cuando arrastras la barra en el Gantt. Con `--cascada` corre también las tareas que vienen
+`--mover` corre la tarea los días hábiles que digas en `--dias`. Con un número negativo, la adelanta.
+Se salta los fines de semana y los feriados según el calendario de GesPro, porque GesPro no acepta
+una fecha no laborable. Si no puede leer ese calendario, avisa y cuenta de lunes a viernes. Si la
+tarea ignora los días no laborables, cuenta días corridos. Cambia el inicio y deja la duración igual,
+así que GesPro calcula el fin con el mismo calendario, como cuando arrastras la barra en el Gantt.
+Si la tarea tiene programación automática y predecesoras, avisa antes de escribir: GesPro puede
+rechazar la fecha nueva, y con `--manual` queda fija. Con `--cascada` corre también las tareas que vienen
 después, siguiendo las relaciones `precede` hasta el final de la cadena. Si una de esas tareas tiene
 programación automática, la mueve GesPro y el script no la toca. El script corre las que están en
-manual. Antes de escribir lee la cadena completa, y si alguna tarea es de otro proyecto no mueve
-ninguna. Si GesPro rechaza una a mitad de camino, el error dice cuáles alcanzó a mover.
+manual. Antes de escribir lee la cadena completa, un nivel por vez, y si alguna tarea es de otro proyecto
+no mueve ninguna. Si GesPro rechaza una a mitad de camino, el error dice cuáles alcanzó a mover.
 
 `--manual` y `--automatica` cambian la programación de la tarea. Una tarea automática empieza cuando
 terminan sus predecesoras y se mueve con ellas. Una manual se queda en sus fechas aunque cambien las

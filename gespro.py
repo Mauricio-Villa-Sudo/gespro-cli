@@ -1351,35 +1351,94 @@ def sequence(relation):
     return None
 
 
-def shift_day(day, days, working=True):
-    """Corre la fecha N dias. Con working cuenta solo de lunes a viernes, porque GesPro rechaza una fecha en
-    fin de semana si la tarea no ignora los dias no laborables. Los feriados no se consideran."""
+# Dias de la semana que no se trabajan (1 es lunes, como en la API) y feriados, si GesPro no los entrega.
+WEEKEND = (frozenset({6, 7}), frozenset())
+
+
+def working_calendar(token, first, last):
+    """Los dias de la semana que no se trabajan y los feriados entre first y last, como los configura GesPro."""
+    filters = [{"date": {"operator": "<>d", "values": [first, last]}}]
+    try:
+        week = elements(request("GET", "/api/v3/days/week", token))
+        holidays = elements(request("GET", with_filters("/api/v3/days/non_working", filters), token))
+    except RuntimeError as error:
+        print(f"Aviso: no pude leer los dias no laborables de GesPro ({error}). Cuento de lunes a viernes, "
+              "sin feriados.", file=sys.stderr)
+        return WEEKEND
+    off = frozenset(day["day"] for day in week if not day.get("working"))
+    if len(off) >= 7:
+        raise RuntimeError("GesPro no tiene ningun dia laborable configurado. No muevo nada.")
+    return off, frozenset(day["date"] for day in holidays)
+
+
+def shift_day(day, days, calendar=None):
+    """Corre la fecha N dias. Con calendar, (dias de la semana libres, feriados), solo cuenta los dias
+    laborables, porque GesPro rechaza una fecha no laborable si la tarea no los ignora. Sin calendar cuenta
+    dias corridos."""
     if not day:
         return None
     current = datetime.date.fromisoformat(day)
-    if not working:
+    if calendar is None:
         return (current + datetime.timedelta(days=days)).isoformat()
+    off, holidays = calendar
     step, remaining = (1 if days > 0 else -1), abs(days)
     while remaining:
         current += datetime.timedelta(days=step)
-        if current.weekday() < 5:
+        if current.isoweekday() not in off and current.isoformat() not in holidays:
             remaining -= 1
     return current.isoformat()
 
 
+def tasks_by_id(token, ids, project_id):
+    """Varias tareas en una consulta, de a 50. Corta si alguna no es del proyecto, como task_in_project."""
+    found = {}
+    for first in range(0, len(ids), 50):
+        filters = [{"id": {"operator": "=", "values": [str(n) for n in ids[first:first + 50]]}},
+                   {"status": {"operator": "*", "values": []}}]
+        payload = request("GET", with_filters("/api/v3/work_packages", filters, pageSize=500), token)
+        found.update((work_package["id"], work_package) for work_package in elements(payload))
+    for wp_id in ids:
+        if wp_id not in found or not found[wp_id]["_links"]["project"]["href"].endswith(f"/projects/{project_id}"):
+            raise RuntimeError(f"#{wp_id} no es de tu proyecto. No toco nada.")
+    return [found[wp_id] for wp_id in ids]
+
+
 def followers(token, project_id, root):
-    """La tarea y todas las que la siguen, directa o indirectamente, en orden de la cadena."""
-    chain, pending = [root], [root["id"]]
-    seen = {root["id"]}
-    while pending:
-        current = pending.pop(0)
-        for relation in relations_of(token, [current]):
+    """La tarea y todas las que la siguen, directa o indirectamente, en orden de la cadena. Lee un nivel
+    de la cadena por vez: dos consultas por nivel, no por tarea."""
+    chain, level, seen = [root], [root["id"]], {root["id"]}
+    while level:
+        current, level = set(level), []
+        for relation in relations_of(token, sorted(current)):
             order = sequence(relation)
-            if order and order[0] == current and order[1] not in seen:
+            if order and order[0] in current and order[1] not in seen:
                 seen.add(order[1])
-                pending.append(order[1])
-                chain.append(task_in_project(token, order[1], project_id))
+                level.append(order[1])
+        chain.extend(tasks_by_id(token, level, project_id) if level else [])
     return chain
+
+
+def warn_if_automatic(token, root):
+    """Una tarea automatica con predecesoras la ubica GesPro, y puede no aceptar el inicio que se le pide."""
+    if root.get("scheduleManually"):
+        return
+    before = sorted({order[0] for order in map(sequence, relations_of(token, [root["id"]]))
+                     if order and order[1] == root["id"]})
+    if before:
+        names = ", ".join(f"#{n}" for n in before)
+        print(f"Aviso: #{root['id']} tiene programacion automatica y la ubican sus predecesoras ({names}). "
+              f"GesPro puede rechazar la fecha nueva o cambiarla. Para fijarla, pasala a manual con "
+              f"--manual {root['id']}.", file=sys.stderr)
+
+
+def chain_calendar(token, chain, days):
+    """El calendario de GesPro para las fechas de la cadena, con margen para los dias que se corren.
+    None si todas las tareas ignoran los dias no laborables."""
+    if all(task.get("ignoreNonWorkingDays") for task in chain):
+        return None
+    known = sorted(day for task in chain for day in (task.get("startDate"), task.get("dueDate")) if day)
+    margin = abs(days) * 3 + 30
+    return working_calendar(token, shift_day(known[0], -margin), shift_day(known[-1], margin))
 
 
 def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
@@ -1394,23 +1453,25 @@ def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
         raise RuntimeError(f"#{wp_id} no tiene fechas. Ponlas con --wp {wp_id} --inicio ... --fin ...")
     # Todo se lee antes de escribir: una sucesora de otro proyecto corta aqui, sin dejar nada a medias.
     chain = followers(token, project_id, root) if cascade else [root]
+    warn_if_automatic(token, root)
+    workdays = chain_calendar(token, chain, days)
     plan = []
     for task in chain:
         start, due = task.get("startDate"), task.get("dueDate")
         label = f"#{task['id']} {task['subject']}"
-        working = not task.get("ignoreNonWorkingDays")
+        calendar = None if task.get("ignoreNonWorkingDays") else workdays
         if not (start or due):
             print(f"{label}: sin fechas, no la muevo")
         elif task is not root and not task.get("scheduleManually"):
             print(f"{label}: programacion automatica, la mueve GesPro")
         elif start:
-            fields = {"startDate": shift_day(start, days, working)}
+            fields = {"startDate": shift_day(start, days, calendar)}
             if task.get("duration"):
                 fields["duration"] = task["duration"]
             plan.append((task, fields))
             print(f"{label}: empieza el {fields['startDate']} (antes {start})")
         else:
-            plan.append((task, {"dueDate": shift_day(due, days, working)}))
+            plan.append((task, {"dueDate": shift_day(due, days, calendar)}))
             print(f"{label}: termina el {plan[-1][1]['dueDate']} (antes {due})")
     if dry_run:
         print("(simulacion) no escribo nada")
@@ -2062,8 +2123,10 @@ def check_planning():
 def check_gantt():
     """--mover, --retraso, --desrelacionar, --manual/--automatica y --gantt contra la API falsa."""
     # Martes menos 3 dias habiles es el jueves anterior; del miercoles 30 de diciembre, 5 saltan el fin de semana.
-    assert shift_day("2026-10-13", -3) == "2026-10-08" and shift_day("2026-12-30", 5) == "2027-01-06"
-    assert shift_day("2026-10-16", 1) == "2026-10-19" and shift_day("2026-10-13", -3, working=False) == "2026-10-10"
+    assert shift_day("2026-10-13", -3, WEEKEND) == "2026-10-08" and shift_day("2026-12-30", 5, WEEKEND) == "2027-01-06"
+    assert shift_day("2026-10-16", 1, WEEKEND) == "2026-10-19" and shift_day("2026-10-13", -3) == "2026-10-10"
+    # El lunes 12 es feriado: un dia habil despues del viernes 9 es el martes 13.
+    assert shift_day("2026-10-09", 1, (frozenset({6, 7}), frozenset({"2026-10-12"}))) == "2026-10-13"
     assert shift_day(None, 5) is None
     error_of(day_arg, "2026-02-30", error=argparse.ArgumentTypeError)
     assert lag_arg("0") == 0 and lag_arg("3") == 3
@@ -2084,18 +2147,32 @@ def check_gantt():
     relations = [relation(50, "precedes", 20, 21, 1), relation(51, "follows", 22, 21), relation(52, "precedes", 20, 23),
                  relation(53, "relates", 20, 24)]
 
+    def filter_values(path, name):
+        filters = json.loads(urllib.parse.parse_qs(path.split("?", 1)[1])["filters"][0])
+        return {int(n) for n in next(f[name]["values"] for f in filters if name in f)}
+
     def involved(path):
-        wanted = {int(n) for n in json.loads(urllib.parse.parse_qs(path.split("?", 1)[1])["filters"][0])[0]
-                  ["involved"]["values"]}
+        wanted = filter_values(path, "involved")
         found = [r for r in relations if {wp_id_of(r["_links"]["from"]), wp_id_of(r["_links"]["to"])} & wanted]
         return {"total": len(found), "_embedded": {"elements": found}}
 
     tasks = {20: task(20, "2026-10-13", "2026-10-15"), 21: task(21, "2026-10-19", "2026-10-21"),
              22: task(22, "2026-10-22", "2026-10-23"), 23: task(23), 24: task(24, "2026-10-01", "2026-10-02"),
              25: task(25, due="2026-10-05")}
-    pages = {"/api/v3/projects/demo": {"id": 7, "name": "Demo"}, "/api/v3/relations": involved,
-             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": list(tasks.values())}},
-             **{f"/api/v3/work_packages/{n}": t for n, t in tasks.items()}}
+    week = {"_embedded": {"elements": [{"day": n, "working": n < 6} for n in range(1, 8)]}}
+
+    def api(*changed, holidays=()):
+        """Las respuestas de GesPro con algunas tareas cambiadas y los feriados que se pidan."""
+        current = {**tasks, **{t["id"]: t for t in changed}}
+        return {"/api/v3/projects/demo": {"id": 7, "name": "Demo"}, "/api/v3/relations": involved,
+                "/api/v3/projects/7/work_packages": {"_embedded": {"elements": list(current.values())}},
+                "/api/v3/work_packages": lambda path: {"_embedded": {"elements": [
+                    current[n] for n in sorted(filter_values(path, "id")) if n in current]}},
+                "/api/v3/days/week": week,
+                "/api/v3/days/non_working": {"_embedded": {"elements": [{"date": d} for d in holidays]}},
+                **{f"/api/v3/work_packages/{n}": t for n, t in current.items()}}
+
+    pages = api()
     dates = lambda write: (write[1].rsplit("/", 1)[1], write[2].get("startDate") or write[2].get("dueDate"))
     writes, output = [], io.StringIO()
     with fake_api(pages, writes), contextlib.redirect_stdout(output):
@@ -2137,14 +2214,42 @@ def check_gantt():
     # Una sucesora con programacion automatica la corre GesPro; la que viene despues de ella, si es manual, no.
     auto = task(21, "2026-10-19", "2026-10-21", scheduleManually=False)
     writes = []
-    with fake_api({**pages, "/api/v3/work_packages/21": auto}, writes), contextlib.redirect_stdout(io.StringIO()):
+    with fake_api(api(auto), writes), contextlib.redirect_stdout(io.StringIO()):
         move_task("demo", 20, 2, cascade=True)
     assert [dates(w)[0] for w in writes] == ["20", "22"]
+
+    # Si la que se mueve es automatica y tiene predecesoras, avisa antes de escribir.
+    writes, warning = [], io.StringIO()
+    with fake_api(api(auto), writes), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(warning):
+        move_task("demo", 21, 1)
+    assert "(#20)" in warning.getvalue() and "--manual 21" in warning.getvalue() and len(writes) == 1
+
+    # El miercoles 14 es feriado en GesPro: dos dias habiles desde el martes 13 llegan al viernes 16.
+    writes = []
+    with fake_api(api(holidays=["2026-10-14"]), writes), contextlib.redirect_stdout(io.StringIO()):
+        move_task("demo", 20, 2)
+    assert [dates(w) for w in writes] == [("20", "2026-10-16")]
+
+    # Si GesPro no entrega el calendario, cuenta de lunes a viernes y lo dice.
+    def no_calendar(path):
+        raise RuntimeError("GET /api/v3/days/week -> HTTP 404: no existe")
+    writes, warning = [], io.StringIO()
+    with fake_api({**pages, "/api/v3/days/week": no_calendar}, writes), contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(warning):
+        move_task("demo", 20, 4)
+    assert "lunes a viernes" in warning.getvalue() and [dates(w) for w in writes] == [("20", "2026-10-19")]
+
+    # Una sucesora de otro proyecto corta la cascada antes de escribir.
+    elsewhere = task(22, "2026-10-22", "2026-10-23", _links={"project": {"href": "/api/v3/projects/8"}})
+    writes = []
+    with fake_api(api(elsewhere), writes), contextlib.redirect_stdout(io.StringIO()):
+        assert "#22 no es de tu proyecto" in error_of(move_task, "demo", 20, 2, True)
+    assert writes == []
 
     # Si la tarea ignora los dias no laborables, como en GesPro, se corre en dias corridos.
     weekend = task(20, "2026-10-16", "2026-10-18", ignoreNonWorkingDays=True)
     writes = []
-    with fake_api({**pages, "/api/v3/work_packages/20": weekend}, writes), contextlib.redirect_stdout(io.StringIO()):
+    with fake_api(api(weekend), writes), contextlib.redirect_stdout(io.StringIO()):
         move_task("demo", 20, 1)
     assert [dates(w) for w in writes] == [("20", "2026-10-17")]
 
@@ -2264,7 +2369,7 @@ def main():
     parser.add_argument("--peso", type=weight_arg, action="append", metavar="ID=HORAS",
                         help="con --puntos: horas con que pesa una tarea, ej. 540=6 (se puede repetir)")
     parser.add_argument("--con", type=int, metavar="ID", help="con --relacionar: la otra tarea")
-    parser.add_argument("--como", choices=list(RELATIONS), default="relacionada",
+    parser.add_argument("--como", choices=list(RELATIONS),
                         help="con --relacionar: tipo de relacion (por defecto, relacionada)")
     parser.add_argument("--retraso", type=lag_arg, metavar="DIAS",
                         help="con --relacionar y --como precede o sigue: dias entre una tarea y la otra")
@@ -2287,6 +2392,8 @@ def main():
             raise RuntimeError("--formato va con --report, --mis-horas, --horas-equipo o --gantt.")
         if args.con and args.relacionar is None and args.desrelacionar is None:
             raise RuntimeError("--con va con --relacionar o --desrelacionar.")
+        if args.como and args.relacionar is None:
+            raise RuntimeError("--como va con --relacionar.")
         if args.retraso is not None and args.relacionar is None:
             raise RuntimeError("--retraso va con --relacionar.")
         if (args.dias is not None or args.cascada) and args.mover is None:
@@ -2317,7 +2424,8 @@ def main():
         if args.relacionar is not None:
             if not args.con:
                 raise RuntimeError("Dime con que tarea relacionarla: --con ID.")
-            return relate(wanted, args.relacionar, args.con, args.como, lag=args.retraso, dry_run=args.dry_run)
+            return relate(wanted, args.relacionar, args.con, args.como or "relacionada", lag=args.retraso,
+                          dry_run=args.dry_run)
         if args.desrelacionar is not None:
             if not args.con:
                 raise RuntimeError("Dime de que tarea separarla: --con ID.")
