@@ -2,6 +2,16 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.8.1, 13 de octubre de 2026
+
+### Corregido
+
+- Hitos. GesPro guarda la fecha de un hito en un solo campo (`date`) y no usa inicio ni fin, así que
+  el script los trataba como tareas sin fechas. Ahora `--gantt` los muestra con su fecha y la marca
+  `hito` (en CSV y JSON, la columna `hito`). `--mover` y `--cascada` corren esa fecha, `--atrasadas`
+  cuenta los hitos vencidos y `--ver` muestra su fecha. Con `--inicio` o `--fin`, un hito recibe una
+  sola fecha. Si le pasas las dos y son distintas, da error.
+
 ## 1.8.0, 13 de octubre de 2026
 
 ### Agregado
