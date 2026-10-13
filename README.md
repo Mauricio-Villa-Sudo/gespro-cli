@@ -329,7 +329,8 @@ python gespro.py --desrelacionar 620 --con 621
 `--gantt` lista las tareas con su inicio, su fin, cuántos días hábiles duran y de cuáles dependen.
 `despues de #620 +2` quiere decir que la tarea empieza dos días hábiles después de que termina la
 #620. Sin filtro muestra todo el proyecto. Con `--sprint` muestra un sprint y con `--padre`, lo que
-está dentro de una historia. También acepta `--formato csv` o `--formato json`.
+está dentro de una historia. También acepta `--formato csv` o `--formato json`. Los hitos tienen una
+sola fecha: salen con la misma fecha de inicio y de fin, y con `hito` en vez de la duración.
 
 `--retraso` va con `--como precede` o `--como sigue` y fija cuántos días deja GesPro entre las dos
 tareas.
@@ -345,6 +346,7 @@ después, siguiendo las relaciones `precede` hasta el final de la cadena. Si una
 programación automática, la mueve GesPro y el script no la toca. El script corre las que están en
 manual. Antes de escribir lee la cadena completa, un nivel por vez, y si alguna tarea es de otro proyecto
 no mueve ninguna. Si GesPro rechaza una a mitad de camino, el error dice cuáles alcanzó a mover.
+Un hito se mueve igual, pero cambia su única fecha.
 
 `--manual` y `--automatica` cambian la programación de la tarea. Una tarea automática empieza cuando
 terminan sus predecesoras y se mueve con ellas. Una manual se queda en sus fechas aunque cambien las

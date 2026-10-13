@@ -29,7 +29,7 @@ import uuid
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.8.0"
+USER_AGENT = "gespro-cli/1.8.1"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -603,6 +603,11 @@ def task_in_project(token, wp_id, project_id):
     return work_package
 
 
+def task_dates(task):
+    """Inicio y fin. Un hito tiene una sola fecha, en date, y no usa startDate ni dueDate."""
+    return task.get("startDate") or task.get("date"), task.get("dueDate") or task.get("date")
+
+
 def resolve_links(token, project_id, sprint=None, status=None, priority=None, assignee_text=None, parent=None):
     """Los enlaces de la API para los nombres escritos, y como mostrarlos. Busca todo antes de escribir,
     para que un nombre mal escrito no deje la tarea a medio cambiar."""
@@ -630,8 +635,10 @@ def resolve_links(token, project_id, sprint=None, status=None, priority=None, as
     return links, shown
 
 
-def value_fields(percent=None, estimate=None, start=None, due=None):
-    """Los campos de la tarea que no son enlaces, y como mostrarlos."""
+def value_fields(percent=None, estimate=None, start=None, due=None, milestone=False):
+    """Los campos de la tarea que no son enlaces, y como mostrarlos. Un hito guarda una sola fecha, en date."""
+    if milestone and start and due and start != due:
+        raise RuntimeError(f"Un hito tiene una sola fecha: usa --inicio o --fin, no {start} y {due}.")
     if start and due and start > due:
         raise RuntimeError(f"--inicio {start} queda despues de --fin {due}.")
     fields, shown = {}, {}
@@ -641,6 +648,10 @@ def value_fields(percent=None, estimate=None, start=None, due=None):
     if estimate:
         fields["estimatedTime"] = iso_duration(round(estimate * 60))
         shown["estimado"] = f"{points_text(estimate)} h"
+    if milestone:
+        if start or due:
+            fields["date"] = shown["fecha del hito"] = start or due
+        return fields, shown
     if start:
         fields["startDate"] = shown["inicio"] = start
     if due:
@@ -733,7 +744,7 @@ def update_work_package(wanted, wp_id, sprint=None, status=None, percent=None, h
     print(f"#{wp_id}: {work_package['subject']} (asignada a {assignee}, prioridad {work_package['_links']['priority']['title']})")
     spent_on = day or datetime.date.today().isoformat()
     links, shown = resolve_links(token, project_id, sprint, status, priority, assignee_text, parent)
-    fields, values_shown = value_fields(percent, estimate, start, due)
+    fields, values_shown = value_fields(percent, estimate, start, due, milestone="date" in work_package)
     if links:
         fields["_links"] = links
     shown.update(values_shown)
@@ -822,7 +833,8 @@ def show_task(wanted, wp_id):
     print(f"#{wp_id} {title('type')}: {task['subject']}")
     print(f"  estado {title('status')}, {task.get('percentageDone') or 0}%, prioridad {title('priority')}")
     print(f"  asignada a {title('assignee')}, sprint {title('version')}, dentro de {title('parent')}")
-    print(f"  del {task.get('startDate') or '-'} al {task.get('dueDate') or '-'}, "
+    start, due = task_dates(task)
+    print(f"  del {start or '-'} al {due or '-'}, "
           f"{points_text(hours_from_iso(task.get('estimatedTime')))} h estimadas, "
           f"{points_text(hours_from_iso(task.get('spentTime')))} h registradas")
     if "storyPoints" in task:
@@ -872,7 +884,8 @@ def create_work_package(wanted, subject, kind=None, description=None, percent=No
         print(f"Ya existe #{twin['id']}: {twin['subject']}. No creo otra; cambiala con --wp {twin['id']}.")
         return 0
     links["type"] = {"href": f"/api/v3/types/{type_id}"}
-    values, values_shown = value_fields(percent, estimate, start, due)
+    milestone = bool((start or due) and request("GET", f"/api/v3/types/{type_id}", token).get("isMilestone"))
+    values, values_shown = value_fields(percent, estimate, start, due, milestone)
     payload = {"subject": subject, "_links": links, **values}
     shown.update(values_shown)
     if description:
@@ -1101,8 +1114,8 @@ def review_project(wanted):
 
 def overdue(tasks, closed, today):
     """Las tareas abiertas con fecha de termino anterior a hoy, de la mas atrasada a la menos."""
-    late = [t for t in tasks if t.get("dueDate") and t["dueDate"] < today and t["_links"]["status"]["href"] not in closed]
-    return sorted(late, key=lambda t: (assignee_of(t), t["dueDate"]))
+    late = [t for t in tasks if (task_dates(t)[1] or "9999") < today and t["_links"]["status"]["href"] not in closed]
+    return sorted(late, key=lambda t: (assignee_of(t), task_dates(t)[1]))
 
 
 def late_tasks(wanted):
@@ -1115,8 +1128,9 @@ def late_tasks(wanted):
         mine = [t for t in late if assignee_of(t) == who]
         print(f"== {who}: {len(mine)}")
         for task in mine:
-            days = (today - datetime.date.fromisoformat(task["dueDate"])).days
-            print(f"  #{task['id']:<5} vencio el {task['dueDate']} (hace {days} dias)  "
+            due = task_dates(task)[1]
+            days = (today - datetime.date.fromisoformat(due)).days
+            print(f"  #{task['id']:<5} vencio el {due} (hace {days} dias)  "
                   f"{task['_links']['status']['title'][:12]:<12} {task['subject'][:50]}")
     return 0
 
@@ -1436,7 +1450,7 @@ def chain_calendar(token, chain, days):
     None si todas las tareas ignoran los dias no laborables."""
     if all(task.get("ignoreNonWorkingDays") for task in chain):
         return None
-    known = sorted(day for task in chain for day in (task.get("startDate"), task.get("dueDate")) if day)
+    known = sorted(day for task in chain for day in task_dates(task) if day)
     margin = abs(days) * 3 + 30
     return working_calendar(token, shift_day(known[0], -margin), shift_day(known[-1], margin))
 
@@ -1449,7 +1463,7 @@ def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
     token = require_token()
     project_id = find_project(token, wanted)["id"]
     root = task_in_project(token, wp_id, project_id)
-    if not (root.get("startDate") or root.get("dueDate")):
+    if not any(task_dates(root)):
         raise RuntimeError(f"#{wp_id} no tiene fechas. Ponlas con --wp {wp_id} --inicio ... --fin ...")
     # Todo se lee antes de escribir: una sucesora de otro proyecto corta aqui, sin dejar nada a medias.
     chain = followers(token, project_id, root) if cascade else [root]
@@ -1457,13 +1471,16 @@ def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
     workdays = chain_calendar(token, chain, days)
     plan = []
     for task in chain:
-        start, due = task.get("startDate"), task.get("dueDate")
+        start, due = task_dates(task)
         label = f"#{task['id']} {task['subject']}"
         calendar = None if task.get("ignoreNonWorkingDays") else workdays
         if not (start or due):
             print(f"{label}: sin fechas, no la muevo")
         elif task is not root and not task.get("scheduleManually"):
             print(f"{label}: programacion automatica, la mueve GesPro")
+        elif task.get("date"):
+            plan.append((task, {"date": shift_day(start, days, calendar)}))
+            print(f"{label}: hito, queda el {plan[-1][1]['date']} (antes {start})")
         elif start:
             fields = {"startDate": shift_day(start, days, calendar)}
             if task.get("duration"):
@@ -1527,21 +1544,22 @@ def gantt(wanted, sprint=None, parent=None, fmt=None):
         filters.append({"version": {"operator": "=", "values": [str(version_id)]}})
     if parent:
         filters.append({"parent": {"operator": "=", "values": [str(parent)]}})
-    tasks = sorted(project_tasks(token, project_id, filters), key=lambda t: (t.get("startDate") or "9999", t["id"]))
+    tasks = sorted(project_tasks(token, project_id, filters), key=lambda t: (task_dates(t)[0] or "9999", t["id"]))
     before = {}
     for relation in relations_of(token, [t["id"] for t in tasks]) if tasks else []:
         order = sequence(relation)
         if order:
             before.setdefault(order[1], set()).add((order[0], order[2]))
-    rows = [{"id": t["id"], "asunto": t["subject"], "inicio": t.get("startDate") or "", "fin": t.get("dueDate") or "",
+    rows = [{"id": t["id"], "asunto": t["subject"], "inicio": task_dates(t)[0] or "", "fin": task_dates(t)[1] or "",
              "dias": round(hours_from_iso(t.get("duration")) / 24) if t.get("duration") else "",
-             "despues de": ", ".join(f"#{n} +{lag}" if lag else f"#{n}" for n, lag in sorted(before.get(t["id"], ())))}
+             "despues de": ", ".join(f"#{n} +{lag}" if lag else f"#{n}" for n, lag in sorted(before.get(t["id"], ()))),
+             "hito": "date" in t}
             for t in tasks]
     if fmt:
         return emit(rows, fmt, list(rows[0]) if rows else ["id"])
     for row in rows:
         after = f"  despues de {row['despues de']}" if row["despues de"] else ""
-        days = f"{row['dias']} d" if row["dias"] != "" else "-"
+        days = "hito" if row["hito"] else f"{row['dias']} d" if row["dias"] != "" else "-"
         print(f"  #{row['id']:<5} {row['inicio'] or '-':<10} {row['fin'] or '-':<10} {days:>5}  "
               f"{row['asunto'][:50]}{after}")
     print(f"\n{len(rows)} tareas")
@@ -1947,6 +1965,8 @@ def check_more_commands():
     for bad in ("0", "-1", "nan", "inf", "0,005"):
         error_of(estimate_arg, bad, error=argparse.ArgumentTypeError)
     assert "queda despues" in error_of(value_fields, None, None, "2026-10-14", "2026-10-09")
+    assert value_fields(None, None, None, "2026-10-14", milestone=True)[0] == {"date": "2026-10-14"}
+    assert "una sola fecha" in error_of(value_fields, None, None, "2026-10-09", "2026-10-14", True)
 
     me_link = {"href": "/api/v3/users/43"}
     task = {"id": 620, "lockVersion": 1, "subject": "Página integradora", "percentageDone": 0, "estimatedTime": "PT3H",
@@ -2018,8 +2038,9 @@ def check_planning():
     problems = {label.split(" (")[0]: [t["id"] for t in found] for label, found in project_problems(tasks, closed).items()}
     assert problems == {"historias sin puntos": [2], "sin padre": [3], "abiertas sin asignar": [3],
                         "abiertas sin horas estimadas": [4], "abiertas sin sprint": [4], "cerradas sin horas registradas": [5]}
-    dated = [task(7, dueDate="2026-10-01"), task(8, dueDate="2026-10-09"), task(9, status=7, dueDate="2026-09-01")]
-    assert [t["id"] for t in overdue(dated, closed, "2026-10-09")] == [7]
+    dated = [task(7, dueDate="2026-10-01"), task(8, dueDate="2026-10-09"), task(9, status=7, dueDate="2026-09-01"),
+             task(10, date="2026-10-02")]  # un hito vencido tambien cuenta
+    assert [t["id"] for t in overdue(dated, closed, "2026-10-09")] == [7, 10]
     days = burndown("2026-10-05", "2026-10-07", 10, {"2026-10-05": 4, "2026-10-04": 99}, "2026-10-06")
     assert days == [("2026-10-05", 6, 10), ("2026-10-06", 6, 5), ("2026-10-07", None, 0)]
     assert previous_workday(datetime.date(2026, 10, 12)).isoformat() == "2026-10-09"  # lunes -> viernes
@@ -2158,7 +2179,10 @@ def check_gantt():
 
     tasks = {20: task(20, "2026-10-13", "2026-10-15"), 21: task(21, "2026-10-19", "2026-10-21"),
              22: task(22, "2026-10-22", "2026-10-23"), 23: task(23), 24: task(24, "2026-10-01", "2026-10-02"),
-             25: task(25, due="2026-10-05")}
+             25: task(25, due="2026-10-05"),
+             26: {**task(26), "date": "2026-10-16", "duration": None}}  # hito: una sola fecha, en date
+    for name in ("startDate", "dueDate"):
+        del tasks[26][name]
     week = {"_embedded": {"elements": [{"day": n, "working": n < 6} for n in range(1, 8)]}}
 
     def api(*changed, holidays=()):
@@ -2186,6 +2210,9 @@ def check_gantt():
         move_task("demo", 25, -1)  # solo tiene fin, un lunes: queda el viernes
         assert writes[0][2] == {"lockVersion": 1, "dueDate": "2026-10-02"}
         writes.clear()
+        move_task("demo", 26, 1)  # el hito del viernes pasa al lunes y se escribe en date
+        assert writes == [("PATCH", "/api/v3/work_packages/26", {"lockVersion": 1, "date": "2026-10-19"})]
+        writes.clear()
         move_task("demo", 20, 2, cascade=True, dry_run=True)
         assert writes == []
         assert "no tiene fechas" in error_of(move_task, "demo", 23, 1)
@@ -2206,10 +2233,12 @@ def check_gantt():
         output.truncate()
         gantt("demo", fmt="json")
         rows = json.loads(output.getvalue())
-        assert [r["id"] for r in rows] == [24, 20, 21, 22, 23, 25]  # por inicio; sin fechas al final
-        assert rows[2] == {"id": 21, "asunto": "Tarea 21", "inicio": "2026-10-19", "fin": "2026-10-21",
-                           "dias": 3, "despues de": "#20 +1"}
-        assert rows[3]["despues de"] == "#21" and rows[1]["despues de"] == ""
+        assert [r["id"] for r in rows] == [24, 20, 26, 21, 22, 23, 25]  # por inicio; sin fechas al final
+        assert rows[3] == {"id": 21, "asunto": "Tarea 21", "inicio": "2026-10-19", "fin": "2026-10-21",
+                           "dias": 3, "despues de": "#20 +1", "hito": False}
+        assert rows[2] == {"id": 26, "asunto": "Tarea 26", "inicio": "2026-10-16", "fin": "2026-10-16",
+                           "dias": "", "despues de": "", "hito": True}
+        assert rows[4]["despues de"] == "#21" and rows[1]["despues de"] == ""
 
     # Una sucesora con programacion automatica la corre GesPro; la que viene despues de ella, si es manual, no.
     auto = task(21, "2026-10-19", "2026-10-21", scheduleManually=False)
