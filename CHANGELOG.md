@@ -2,6 +2,32 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.8.0, 13 de octubre de 2026
+
+### Agregado
+
+- `--gantt`: inicio, fin, duración y dependencias de cada tarea, de todo el proyecto o filtradas con
+  `--sprint` o `--padre`. Acepta `--formato csv|json`.
+- `--mover ID --dias N`: corre la tarea N días hábiles (con N negativo, la adelanta). Se salta los
+  fines de semana y los feriados que tiene configurados GesPro. Si la tarea ignora los días no
+  laborables, cuenta días corridos. Avisa si la tarea es automática y tiene predecesoras. Mantiene la
+  duración y GesPro calcula el fin en días hábiles. Con `--cascada` mueve también las tareas que la siguen, salvo
+  las de programación automática, porque a esas las mueve GesPro.
+- `--retraso N` con `--relacionar ... --como precede` o `sigue`: los días entre una tarea y la otra.
+  `--como` ahora da error si no va con `--relacionar`.
+- `--desrelacionar ID --con ID`: borra la relación entre dos tareas.
+- `--manual ID` y `--automatica ID`: cambian la programación de la tarea en el Gantt.
+
+## 1.7.2, 12 de octubre de 2026
+
+### Corregido
+
+- `--formato csv`: un texto que empieza con `=`, `+`, `-`, `@`, tabulación o retorno de carro sale con
+  un apóstrofo adelante. Antes, un asunto como `=1+1` se calculaba como fórmula al abrir el archivo en
+  Excel. El JSON no cambia.
+- Tableros: si el `queryId` de una columna no es un número, el script se salta esa columna en vez de
+  usarlo para armar la ruta de la API.
+
 ## 1.7.1, 10 de octubre de 2026
 
 ### Cambiado
