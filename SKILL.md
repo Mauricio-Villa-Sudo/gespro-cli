@@ -37,6 +37,8 @@ Para escribir:
 - `--editar-horas ID`, `--borrar-horas ID` (el `id` sale de `--mis-horas`)
 - `--commit`, `--en-texto "texto con OP#N"`
 - `--cerrar-sprint S --sprint S2`, `--relacionar N --con M [--como bloquea]`, `--adjuntar N archivo`
+- `--llenar-campos [--campo NOMBRE=VALOR]` llena Sprint, Repository URL y Pull Request URL de cada
+  tarea, más los campos fijos de `--campo`. Se ejecuta dentro del repo del proyecto y usa `gh`.
 - `--mover N --dias D [--cascada]`, `--relacionar N --con M --como precede --retraso D`,
   `--desrelacionar N --con M`, `--manual N`, `--automatica N`
 

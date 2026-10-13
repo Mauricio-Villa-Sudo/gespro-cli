@@ -29,7 +29,7 @@ import uuid
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.8.1"
+USER_AGENT = "gespro-cli/1.9.0"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -150,11 +150,16 @@ def hours_in(text):
         raise RuntimeError(f'La linea "Horas: {values[0]}" no sirve: escribe solo el numero, por ejemplo Horas: 1,5.') from None
 
 
-def github_commit_url(remote, full_hash):
-    """Enlace al commit si el remoto es de GitHub. Un remoto con usuario o token en la URL no calza,
-    asi esos datos nunca terminan en un comentario."""
+def github_repo_url(remote):
+    """Enlace al repositorio si el remoto es de GitHub. Un remoto con usuario o token en la URL no calza,
+    asi esos datos nunca terminan en GesPro."""
     match = re.match(r"^(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?$", remote or "")
-    return f"https://github.com/{match.group(1)}/commit/{full_hash}" if match else None
+    return f"https://github.com/{match.group(1)}" if match else None
+
+
+def github_commit_url(remote, full_hash):
+    repo = github_repo_url(remote)
+    return f"{repo}/commit/{full_hash}" if repo else None
 
 
 def iso_duration(minutes):
@@ -1256,6 +1261,134 @@ def close_sprint(wanted, closing, target, dry_run=False):
     return 1 if failed else 0
 
 
+# Campos personalizados que --llenar-campos completa solo, si el proyecto los tiene.
+SPRINT_FIELD, REPO_FIELD, PR_FIELD = "Sprint", "Repository URL", "Pull Request URL"
+TEXT_FIELDS = ("String", "Text", "Link", "Integer", "Float")
+
+
+def field_arg(value):
+    name, separator, text = value.partition("=")
+    if not separator or not name.strip() or not text.strip():
+        raise argparse.ArgumentTypeError(f'"{value}" no sirve: usa NOMBRE=VALOR, por ejemplo Campus=Santiago.')
+    return name.strip(), text.strip()
+
+
+def custom_fields(token, task, cache):
+    """Los campos personalizados del tipo de la tarea, por nombre sin tildes. El formulario trae las
+    opciones de los campos de lista, que el esquema solo no trae."""
+    schema_href = task["_links"]["schema"]["href"]
+    if schema_href not in cache:
+        form = request("POST", f"/api/v3/work_packages/{task['id']}/form", token, {"lockVersion": task["lockVersion"]})
+        schema = form["_embedded"]["schema"]
+        cache[schema_href] = {plain(field["name"]): (key, field) for key, field in schema.items()
+                              if key.startswith("customField") and field.get("writable")}
+    return cache[schema_href]
+
+
+def field_value(key, field, text):
+    """Lo que se manda en el PATCH para poner ese texto en el campo, y el valor que queda guardado."""
+    if field["type"] in TEXT_FIELDS:
+        return {key: text}, text
+    if field["type"] == "CustomOption":
+        options = field.get("_embedded", {}).get("allowedValues", [])
+        option = next((o for o in options if plain(o["value"]) == plain(text)), None)
+        if not option:
+            raise RuntimeError(f'"{text}" no es una opcion de {field["name"]}. Opciones: '
+                               f'{", ".join(o["value"] for o in options)}')
+        href = option["_links"]["self"]["href"]
+        return {"_links": {key: {"href": href}}}, href
+    raise RuntimeError(f'No se llenar el campo {field["name"]} (tipo {field["type"]}).')
+
+
+def current_value(task, key, field):
+    if field["type"] == "CustomOption":
+        return (task["_links"].get(key) or {}).get("href")
+    return task.get(key)
+
+
+def pull_requests_by_task(prs):
+    """El PR mas reciente que nombra cada tarea con OP#N o con su rama task/N. Los cerrados sin
+    integrar no cuentan."""
+    found = {}
+    for pr in sorted(prs, key=lambda pr: pr["number"]):
+        if pr["state"] == "CLOSED":
+            continue
+        ids = set(references(f"{pr['title']}\n{pr.get('body') or ''}"))
+        ids.update(int(n) for n in re.findall(r"(?:^|/)task/(\d+)", pr.get("headRefName") or ""))
+        found.update({task_id: pr["url"] for task_id in ids})
+    return found
+
+
+def repository_links():
+    """El enlace del repositorio y el PR de cada tarea, si esto corre dentro de un repo de GitHub."""
+    try:
+        repo = github_repo_url(git("remote", "get-url", "origin", check=False))
+    except OSError:
+        repo = None
+    if not repo:
+        print("Aviso: no estoy en un repositorio de GitHub; no lleno el repositorio ni los PR.")
+        return None, {}
+    try:
+        listing = subprocess.run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json",
+                                  "number,url,title,body,headRefName,state"],
+                                 capture_output=True, encoding="utf-8", errors="replace", check=True)
+        return repo, pull_requests_by_task(json.loads(listing.stdout))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        print("Aviso: no pude leer los PR con gh (instalalo y ejecuta gh auth login); no lleno los PR.")
+        return repo, {}
+
+
+def field_changes(task, fields, values):
+    """El PATCH que deja la tarea con esos valores y la lista de lo que cambia; vacio si ya los tiene."""
+    patch, links, shown = {}, {}, []
+    for name, text in values.items():
+        if not text or plain(name) not in fields:
+            continue
+        key, field = fields[plain(name)]
+        change, stored = field_value(key, field, text)
+        if current_value(task, key, field) == stored:
+            continue
+        links.update(change.pop("_links", {}))
+        patch.update(change)
+        shown.append(f"{field['name']}={text}")
+    return ({**patch, "_links": links} if links else patch), shown
+
+
+def fill_fields(wanted, fixed=(), dry_run=False):
+    """Llena los campos personalizados de todas las tareas. El sprint, el repositorio y el PR salen de
+    la tarea y de GitHub; los de --campo van iguales en todas."""
+    token = require_token()
+    project = find_project(token, wanted)
+    repo, prs = repository_links()
+    tasks = project_tasks(token, project["id"])
+    cache, changed, failed = {}, 0, 0
+    for task in tasks:
+        fields = custom_fields(token, task, cache)
+        values = {SPRINT_FIELD: (task["_links"].get("version") or {}).get("title"), REPO_FIELD: repo,
+                  PR_FIELD: prs.get(task["id"]), **dict(fixed)}
+        patch, shown = field_changes(task, fields, values)
+        if not patch:
+            continue
+        line = f"  #{task['id']:<5} {', '.join(shown)}"
+        if dry_run:
+            print(f"{line}  (simulacion)")
+            changed += 1
+            continue
+        # Una tarea que alguien esta editando (409) no frena a las demas.
+        try:
+            patch_work_package(token, task, **patch)
+            print(line)
+            changed += 1
+        except RuntimeError as error:
+            print(f"{line}  Error: {error}")
+            failed += 1
+    missing = [name for name, _ in fixed if not any(plain(name) in fields for fields in cache.values())]
+    if missing:
+        raise RuntimeError(f"Ninguna tarea tiene el campo {', '.join(missing)}.")
+    print(f"{changed} de {len(tasks)} tareas {'cambiarian' if dry_run else 'cambiaron'}; {len(prs)} tareas con PR")
+    return 1 if failed else 0
+
+
 def csv_rows(handle):
     """Las filas de un CSV de tareas, ya validadas. Acepta coma o punto y coma (Excel en espanol usa ;)."""
     text = handle.read()
@@ -2296,6 +2429,56 @@ def check_gantt():
         assert "HTTP 422" in error_of(relate, "demo", 20, 22, "precede", 9)
 
 
+def check_fill_fields():
+    """--llenar-campos: que lleva cada tarea, sin red ni GitHub."""
+    from unittest import mock
+
+    prs = [{"number": 1, "url": "u/1", "title": "OP#10", "body": "", "headRefName": "x", "state": "MERGED"},
+           {"number": 2, "url": "u/2", "title": "x", "body": "", "headRefName": "task/10-login", "state": "OPEN"},
+           {"number": 3, "url": "u/3", "title": "OP#11", "body": None, "headRefName": "x", "state": "CLOSED"},
+           {"number": 4, "url": "u/4", "title": "x", "body": "GesPro: OP#11 y OP#12.", "headRefName": "x",
+            "state": "MERGED"}]
+    assert pull_requests_by_task(prs) == {10: "u/2", 11: "u/4", 12: "u/4"}
+    assert github_repo_url("git@github.com:org/repo.git") == "https://github.com/org/repo"
+    assert github_repo_url("https://user:token@github.com/org/repo") is None
+    assert field_arg(" Campus = Viña del Mar ") == ("Campus", "Viña del Mar")
+    for bad in ("Campus", "=x", "Campus="):
+        error_of(field_arg, bad, error=argparse.ArgumentTypeError)
+
+    campus = {"name": "Campus", "type": "CustomOption", "writable": True, "_embedded": {"allowedValues": [
+        {"value": "Viña del Mar", "_links": {"self": {"href": "/api/v3/custom_options/12"}}}]}}
+    schema = {"customField3": campus, "customField13": {"name": "Sprint", "type": "String", "writable": True},
+              "customField11": {"name": "Pull Request URL", "type": "Link", "writable": True},
+              "customField9": {"name": "Client", "type": "String", "writable": False}, "subject": {"name": "x"}}
+
+    def task(task_id, version=None, **fields):
+        links = {"schema": {"href": "/api/v3/work_packages/schemas/7-1"}, "customField3": {"href": None}}
+        if version:
+            links["version"] = {"title": version}
+        return {"id": task_id, "lockVersion": 1, "_links": links, **fields}
+
+    done = task(11, "Sprint 3", customField13="Sprint 3", customField11="u/4")
+    done["_links"]["customField3"] = {"href": "/api/v3/custom_options/12"}
+    tasks = [task(10, "Sprint 3"), done, task(12)]
+    pages = {"/api/v3/projects/demo": {"id": 7}, "/api/v3/projects/7/work_packages": {"_embedded": {"elements": tasks}}}
+    form = {"_embedded": {"schema": schema}}
+    writes, output = [], io.StringIO()
+    with fake_api(pages, writes, lambda method, payload: form if payload == {"lockVersion": 1} else {}), \
+            mock.patch.object(sys.modules[__name__], "repository_links", lambda: ("https://github.com/o/r", {10: "u/2"})), \
+            contextlib.redirect_stdout(output):
+        assert fill_fields("demo", [("campus", "viña del mar")]) == 0
+        patches = [w for w in writes if w[0] == "PATCH"]
+        # El formulario se pide una vez por tipo; #11 ya tiene todo; #12 no tiene sprint ni PR.
+        assert len(writes) - len(patches) == 1
+        assert [w[1] for w in patches] == ["/api/v3/work_packages/10", "/api/v3/work_packages/12"]
+        assert patches[0][2] == {"lockVersion": 1, "customField13": "Sprint 3", "customField11": "u/2",
+                                 "_links": {"customField3": {"href": "/api/v3/custom_options/12"}}}
+        assert patches[1][2] == {"lockVersion": 1, "_links": {"customField3": {"href": "/api/v3/custom_options/12"}}}
+        assert "Opciones: Viña del Mar" in error_of(fill_fields, "demo", [("Campus", "Santiago")])
+        assert "Ninguna tarea tiene el campo Course" in error_of(fill_fields, "demo", [("Course", "X")], True)
+        assert "campo Client" in error_of(fill_fields, "demo", [("Client", "X")], True)  # de solo lectura
+
+
 def self_check():
     assert iso_duration(360) == "PT6H" and iso_duration(15) == "PT15M" and iso_duration(137) == "PT2H17M"
     assert hours_from_iso("PT2H30M") == 2.5 and hours_from_iso("PT45M") == 0.75 and hours_from_iso(None) == 0
@@ -2339,6 +2522,7 @@ def self_check():
     check_more_commands()
     check_planning()
     check_gantt()
+    check_fill_fields()
     print("autotest: todo bien")
     return 0
 
@@ -2377,6 +2561,8 @@ def main():
     group.add_argument("--adjuntar", nargs=2, metavar=("ID", "ARCHIVO"), help="sube un archivo a la tarea")
     group.add_argument("--iniciar", type=int, metavar="ID", help="empieza a contar el tiempo en esa tarea")
     group.add_argument("--parar", action="store_true", help="registra el tiempo desde --iniciar")
+    group.add_argument("--llenar-campos", action="store_true",
+                       help="llena sprint, repositorio y PR de cada tarea (ejecutalo dentro del repo)")
     group.add_argument("--check", action="store_true", help="prueba local, sin red")
     parser.add_argument("--proyecto", help="identificador del proyecto (si no, GESPRO_PROJECT)")
     parser.add_argument("--tipo", help='con --crear: Task (por defecto), "User story", Epic, Bug...')
@@ -2406,6 +2592,8 @@ def main():
     parser.add_argument("--cascada", action="store_true", help="con --mover: corre tambien las tareas que la siguen")
     parser.add_argument("--formato", choices=("json", "csv"),
                         help="con --report, --mis-horas, --horas-equipo o --gantt: salida en JSON o CSV")
+    parser.add_argument("--campo", type=field_arg, action="append", metavar="NOMBRE=VALOR",
+                        help="con --llenar-campos: un campo que va igual en todas, ej. Campus=Santiago")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
     # En Windows, lo que sale a un archivo o a otro programa iria en cp1252 y romperia las tildes.
@@ -2446,6 +2634,10 @@ def main():
             return sprint_burndown(wanted, args.sprint)
         if args.daily:
             return daily(wanted, args.fecha)
+        if args.campo and not args.llenar_campos:
+            raise RuntimeError("--campo va con --llenar-campos.")
+        if args.llenar_campos:
+            return fill_fields(wanted, args.campo or (), args.dry_run)
         if args.cerrar_sprint is not None:
             return close_sprint(wanted, args.cerrar_sprint, args.sprint, args.dry_run)
         if args.crear_desde is not None:

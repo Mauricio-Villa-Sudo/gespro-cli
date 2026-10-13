@@ -2,6 +2,15 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.9.0, 13 de octubre de 2026
+
+### Agregado
+
+- `--llenar-campos`: llena los campos personalizados de todas las tareas. `Sprint` sale de la versión,
+  `Repository URL` del remoto de GitHub y `Pull Request URL` del PR más reciente que nombra la tarea
+  con `OP#N` o con la rama `task/N`. Con `--campo NOMBRE=VALOR` se agrega un valor fijo para todas,
+  también en campos de lista como Campus. Solo escribe en las tareas a las que les falta algo.
+
 ## 1.8.1, 13 de octubre de 2026
 
 ### Corregido
