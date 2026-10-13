@@ -2,6 +2,19 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.8.0, 13 de octubre de 2026
+
+### Agregado
+
+- `--gantt`: inicio, fin, duración y dependencias de cada tarea, de todo el proyecto o filtradas con
+  `--sprint` o `--padre`. Acepta `--formato csv|json`.
+- `--mover ID --dias N`: corre la tarea N días (con N negativo, la adelanta). Mantiene la duración y
+  GesPro calcula el fin en días hábiles. Con `--cascada` mueve también las tareas que la siguen, salvo
+  las de programación automática, porque a esas las mueve GesPro.
+- `--retraso N` con `--relacionar ... --como precede` o `sigue`: los días entre una tarea y la otra.
+- `--desrelacionar ID --con ID`: borra la relación entre dos tareas.
+- `--manual ID` y `--automatica ID`: cambian la programación de la tarea en el Gantt.
+
 ## 1.7.2, 12 de octubre de 2026
 
 ### Corregido

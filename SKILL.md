@@ -23,7 +23,8 @@ Para leer, que no escriben nada:
 - `--mis-tareas`, `--mis-horas [--desde AAAA-MM-DD]`, `--buscar TEXTO`, `--ver N`, `--miembros`
 - `--report`, `--sprint-actual`, `--horas-equipo [--desde ...]`
 - `--revisar`, `--atrasadas`, `--burndown [--sprint ...]`, `--daily [--fecha ...]`
-- `--formato csv|json` con `--report`, `--mis-horas` y `--horas-equipo`
+- `--gantt [--sprint S | --padre N]`: fechas, duración y dependencias
+- `--formato csv|json` con `--report`, `--mis-horas`, `--horas-equipo` y `--gantt`
 
 Para escribir:
 
@@ -36,6 +37,8 @@ Para escribir:
 - `--editar-horas ID`, `--borrar-horas ID` (el `id` sale de `--mis-horas`)
 - `--commit`, `--en-texto "texto con OP#N"`
 - `--cerrar-sprint S --sprint S2`, `--relacionar N --con M [--como bloquea]`, `--adjuntar N archivo`
+- `--mover N --dias D [--cascada]`, `--relacionar N --con M --como precede --retraso D`,
+  `--desrelacionar N --con M`, `--manual N`, `--automatica N`
 - `--iniciar N`, `--parar [--comment ...]`
 
 `--proyecto identificador` cambia de proyecto en una sola llamada. Los detalles de cada comando están

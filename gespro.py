@@ -29,7 +29,7 @@ import uuid
 
 BASE_URL = "https://gespro.devhub.cl"
 # Cloudflare responde 403 (error 1010) al User-Agent por defecto de urllib antes de llegar a la API.
-USER_AGENT = "gespro-cli/1.7.2"
+USER_AGENT = "gespro-cli/1.8.0"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gespro.env")
 # Una tarea se menciona como OP#533, igual que en la integracion de OpenProject con GitHub.
 REFERENCE = re.compile(r"\bOP#(\d+)\b", re.IGNORECASE)
@@ -115,6 +115,13 @@ def date_arg(value):
     if day > datetime.date.today().isoformat():
         raise argparse.ArgumentTypeError("no se registran horas en fechas futuras")
     return day
+
+
+def lag_arg(value):
+    """Dias de retraso de una relacion: un entero desde 0."""
+    if not value.isdigit():
+        raise argparse.ArgumentTypeError("tiene que ser un numero entero de dias, desde 0")
+    return int(value)
 
 
 def estimate_arg(value):
@@ -1291,21 +1298,179 @@ def create_from_csv(wanted, path, dry_run=False):
     return 1 if failed else 0
 
 
-def relate(wanted, wp_id, other_id, kind="relacionada", dry_run=False):
-    """Crea una relacion entre dos tareas del proyecto, por ejemplo que #620 bloquea a #621."""
+def relate(wanted, wp_id, other_id, kind="relacionada", lag=None, dry_run=False):
+    """Crea una relacion entre dos tareas del proyecto, por ejemplo que #620 bloquea a #621. lag son los
+    dias que GesPro deja entre una y otra en el Gantt; solo existe en precede y sigue."""
     if wp_id == other_id:
         raise RuntimeError("Una tarea no se puede relacionar consigo misma.")
+    if lag is not None and kind not in ("precede", "sigue"):
+        raise RuntimeError("--retraso va con --como precede o sigue.")
     token = require_token()
     project_id = find_project(token, wanted)["id"]
     first, second = task_in_project(token, wp_id, project_id), task_in_project(token, other_id, project_id)
-    print(f"#{wp_id} {first['subject']}\n  {kind}\n#{other_id} {second['subject']}")
+    delay = f" (con {lag} dias de retraso)" if lag else ""
+    print(f"#{wp_id} {first['subject']}\n  {kind}{delay}\n#{other_id} {second['subject']}")
     if dry_run:
         print("(simulacion) no escribo nada")
         return 0
     payload = {"type": RELATIONS[kind], "_links": {"from": {"href": f"/api/v3/work_packages/{wp_id}"},
                                                   "to": {"href": f"/api/v3/work_packages/{other_id}"}}}
+    if lag is not None:
+        payload["lag"] = lag
     request("POST", f"/api/v3/work_packages/{wp_id}/relations", token, payload)
     print("relacion creada")
+    return 0
+
+
+def wp_id_of(link):
+    return int(link["href"].rsplit("/", 1)[1])
+
+
+def relations_of(token, ids):
+    """Las relaciones donde aparece alguna de esas tareas, de cualquier lado. Pide de a 50 tareas para
+    que la URL no crezca con el proyecto."""
+    ids, found = list(ids), {}
+    for first in range(0, len(ids), 50):
+        filters = [{"involved": {"operator": "=", "values": [str(n) for n in ids[first:first + 50]]}}]
+        payload = request("GET", with_filters("/api/v3/relations", filters, pageSize=500), token)
+        page = elements(payload)
+        if payload.get("total", 0) > len(page):
+            raise RuntimeError(f"GesPro tiene {payload['total']} relaciones y solo entrego {len(page)}.")
+        found.update((relation["id"], relation) for relation in page)
+    return list(found.values())
+
+
+def sequence(relation):
+    """(antes, despues, retraso) si la relacion ordena dos tareas en el Gantt. GesPro puede devolver
+    "A precede a B" como "B sigue a A", asi que se leen las dos formas."""
+    ends = wp_id_of(relation["_links"]["from"]), wp_id_of(relation["_links"]["to"])
+    if relation["type"] == "precedes":
+        return ends[0], ends[1], relation.get("lag") or 0
+    if relation["type"] == "follows":
+        return ends[1], ends[0], relation.get("lag") or 0
+    return None
+
+
+def shift_day(day, days):
+    return (datetime.date.fromisoformat(day) + datetime.timedelta(days=days)).isoformat() if day else None
+
+
+def followers(token, project_id, root):
+    """La tarea y todas las que la siguen, directa o indirectamente, en orden de la cadena."""
+    chain, pending = [root], [root["id"]]
+    seen = {root["id"]}
+    while pending:
+        current = pending.pop(0)
+        for relation in relations_of(token, [current]):
+            order = sequence(relation)
+            if order and order[0] == current and order[1] not in seen:
+                seen.add(order[1])
+                pending.append(order[1])
+                chain.append(task_in_project(token, order[1], project_id))
+    return chain
+
+
+def move_task(wanted, wp_id, days, cascade=False, dry_run=False):
+    """Corre la tarea N dias; con cascade, tambien las que la siguen (precede). Se mueve el inicio y se
+    conserva la duracion, para que GesPro calcule el fin en dias habiles como en el Gantt."""
+    if days == 0:
+        raise RuntimeError("Mover 0 dias no cambia nada. Usa --dias con un numero distinto de 0.")
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    root = task_in_project(token, wp_id, project_id)
+    if not (root.get("startDate") or root.get("dueDate")):
+        raise RuntimeError(f"#{wp_id} no tiene fechas. Ponlas con --wp {wp_id} --inicio ... --fin ...")
+    # Todo se lee antes de escribir: una sucesora de otro proyecto corta aqui, sin dejar nada a medias.
+    chain = followers(token, project_id, root) if cascade else [root]
+    plan = []
+    for task in chain:
+        start, due = task.get("startDate"), task.get("dueDate")
+        label = f"#{task['id']} {task['subject']}"
+        if not (start or due):
+            print(f"{label}: sin fechas, no la muevo")
+        elif task is not root and not task.get("scheduleManually"):
+            print(f"{label}: programacion automatica, la mueve GesPro")
+        elif start:
+            fields = {"startDate": shift_day(start, days)}
+            if task.get("duration"):
+                fields["duration"] = task["duration"]
+            plan.append((task, fields))
+            print(f"{label}: empieza el {fields['startDate']} (antes {start})")
+        else:
+            plan.append((task, {"dueDate": shift_day(due, days)}))
+            print(f"{label}: termina el {plan[-1][1]['dueDate']} (antes {due})")
+    if dry_run:
+        print("(simulacion) no escribo nada")
+        return 0
+    moved = []
+    for task, fields in plan:
+        try:
+            patch_work_package(token, task, **fields)
+        except RuntimeError as error:
+            done = f" Ya movi {', '.join(moved)}." if moved else ""
+            raise RuntimeError(f"No pude mover #{task['id']}: {error}.{done}") from None
+        moved.append(f"#{task['id']}")
+    print(f"movidas: {', '.join(moved)}")
+    return 0
+
+
+def unrelate(wanted, wp_id, other_id, dry_run=False):
+    """Borra las relaciones entre dos tareas del proyecto, sea cual sea su tipo y su sentido."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    task_in_project(token, wp_id, project_id)
+    task_in_project(token, other_id, project_id)
+    found = [r for r in relations_of(token, [wp_id])
+             if {wp_id_of(r["_links"]["from"]), wp_id_of(r["_links"]["to"])} == {wp_id, other_id}]
+    if not found:
+        raise RuntimeError(f"No hay relacion entre #{wp_id} y #{other_id}.")
+    for relation in found:
+        print(f"#{wp_id_of(relation['_links']['from'])} {relation['type']} #{wp_id_of(relation['_links']['to'])}")
+        if not dry_run:
+            request("DELETE", f"/api/v3/relations/{relation['id']}", token)
+    print("(simulacion) no borro nada" if dry_run else "relacion borrada")
+    return 0
+
+
+def set_scheduling(wanted, wp_id, manual, dry_run=False):
+    """Programacion manual: GesPro no mueve la tarea cuando cambian sus predecesoras. Automatica: si."""
+    token = require_token()
+    work_package = task_in_project(token, wp_id, find_project(token, wanted)["id"])
+    mode = "manual" if manual else "automatica"
+    print(f"#{wp_id} {work_package['subject']}: programacion {mode}")
+    if not dry_run:
+        patch_work_package(token, work_package, scheduleManually=manual)
+    return 0
+
+
+def gantt(wanted, sprint=None, parent=None, fmt=None):
+    """Lo que muestra el Gantt de GesPro: fechas, duracion y de que tareas depende cada una."""
+    token = require_token()
+    project_id = find_project(token, wanted)["id"]
+    filters = []
+    if sprint:
+        version_id = find_by_name(token, f"/api/v3/projects/{project_id}/versions", sprint, "el sprint")
+        filters.append({"version": {"operator": "=", "values": [str(version_id)]}})
+    if parent:
+        filters.append({"parent": {"operator": "=", "values": [str(parent)]}})
+    tasks = sorted(project_tasks(token, project_id, filters), key=lambda t: (t.get("startDate") or "9999", t["id"]))
+    before = {}
+    for relation in relations_of(token, [t["id"] for t in tasks]) if tasks else []:
+        order = sequence(relation)
+        if order:
+            before.setdefault(order[1], set()).add((order[0], order[2]))
+    rows = [{"id": t["id"], "asunto": t["subject"], "inicio": t.get("startDate") or "", "fin": t.get("dueDate") or "",
+             "dias": round(hours_from_iso(t.get("duration")) / 24) if t.get("duration") else "",
+             "despues de": ", ".join(f"#{n} +{lag}" if lag else f"#{n}" for n, lag in sorted(before.get(t["id"], ())))}
+            for t in tasks]
+    if fmt:
+        return emit(rows, fmt, list(rows[0]) if rows else ["id"])
+    for row in rows:
+        after = f"  despues de {row['despues de']}" if row["despues de"] else ""
+        days = f"{row['dias']} d" if row["dias"] != "" else "-"
+        print(f"  #{row['id']:<5} {row['inicio'] or '-':<10} {row['fin'] or '-':<10} {days:>5}  "
+              f"{row['asunto'][:50]}{after}")
+    print(f"\n{len(rows)} tareas")
     return 0
 
 
@@ -1881,6 +2046,100 @@ def check_planning():
     assert "- #10 Tarea 10: Login listo (1,5 h)" in text and '"persona": "YO"' in text
 
 
+def check_gantt():
+    """--mover, --retraso, --desrelacionar, --manual/--automatica y --gantt contra la API falsa."""
+    assert shift_day("2026-10-13", -3) == "2026-10-10" and shift_day("2026-12-30", 5) == "2027-01-04"
+    assert shift_day(None, 5) is None
+    error_of(day_arg, "2026-02-30", error=argparse.ArgumentTypeError)
+    assert lag_arg("0") == 0 and lag_arg("3") == 3
+    for bad in ("-1", "1,5", "dos"):
+        error_of(lag_arg, bad, error=argparse.ArgumentTypeError)
+
+    def task(task_id, start=None, due=None, **fields):
+        return {"id": task_id, "lockVersion": 1, "subject": f"Tarea {task_id}", "startDate": start, "dueDate": due,
+                "duration": "P3D" if start else None, "scheduleManually": True,
+                "_links": {"project": {"href": "/api/v3/projects/7"}}, **fields}
+
+    def relation(rel_id, kind, source, target, lag=None):
+        return {"id": rel_id, "type": kind, "lag": lag,
+                "_links": {"from": {"href": f"/api/v3/work_packages/{source}"},
+                           "to": {"href": f"/api/v3/work_packages/{target}"}}}
+
+    # #20 precede a #21 con un dia de retraso; #22 sigue a #21 (GesPro la guarda al reves); #23 no tiene fechas.
+    relations = [relation(50, "precedes", 20, 21, 1), relation(51, "follows", 22, 21), relation(52, "precedes", 20, 23),
+                 relation(53, "relates", 20, 24)]
+
+    def involved(path):
+        wanted = {int(n) for n in json.loads(urllib.parse.parse_qs(path.split("?", 1)[1])["filters"][0])[0]
+                  ["involved"]["values"]}
+        found = [r for r in relations if {wp_id_of(r["_links"]["from"]), wp_id_of(r["_links"]["to"])} & wanted]
+        return {"total": len(found), "_embedded": {"elements": found}}
+
+    tasks = {20: task(20, "2026-10-13", "2026-10-15"), 21: task(21, "2026-10-17", "2026-10-20"),
+             22: task(22, "2026-10-21", "2026-10-22"), 23: task(23), 24: task(24, "2026-10-01", "2026-10-02"),
+             25: task(25, due="2026-10-05")}
+    pages = {"/api/v3/projects/demo": {"id": 7, "name": "Demo"}, "/api/v3/relations": involved,
+             "/api/v3/projects/7/work_packages": {"_embedded": {"elements": list(tasks.values())}},
+             **{f"/api/v3/work_packages/{n}": t for n, t in tasks.items()}}
+    dates = lambda write: (write[1].rsplit("/", 1)[1], write[2].get("startDate") or write[2].get("dueDate"))
+    writes, output = [], io.StringIO()
+    with fake_api(pages, writes), contextlib.redirect_stdout(output):
+        move_task("demo", 20, 2, cascade=True)
+        assert [dates(w) for w in writes] == [("20", "2026-10-15"), ("21", "2026-10-19"), ("22", "2026-10-23")]
+        assert writes[0][2] == {"lockVersion": 1, "startDate": "2026-10-15", "duration": "P3D"}
+        writes.clear()
+        move_task("demo", 20, -3)
+        assert [dates(w) for w in writes] == [("20", "2026-10-10")]
+        writes.clear()
+        move_task("demo", 25, -1)  # solo tiene fin
+        assert writes[0][2] == {"lockVersion": 1, "dueDate": "2026-10-04"}
+        writes.clear()
+        move_task("demo", 20, 2, cascade=True, dry_run=True)
+        assert writes == []
+        assert "no tiene fechas" in error_of(move_task, "demo", 23, 1)
+        assert "0 dias" in error_of(move_task, "demo", 20, 0)
+
+        relate("demo", 20, 22, "precede", lag=2)
+        assert writes[0][2]["type"] == "precedes" and writes[0][2]["lag"] == 2
+        assert "precede o sigue" in error_of(relate, "demo", 20, 22, "bloquea", 2)
+        writes.clear()
+        unrelate("demo", 21, 20)
+        assert writes == [("DELETE", "/api/v3/relations/50", None)]
+        assert "No hay relacion" in error_of(unrelate, "demo", 21, 23)
+        writes.clear()
+        set_scheduling("demo", 20, manual=False)
+        assert writes == [("PATCH", "/api/v3/work_packages/20", {"lockVersion": 1, "scheduleManually": False})]
+        writes.clear()
+        output.seek(0)
+        output.truncate()
+        gantt("demo", fmt="json")
+        rows = json.loads(output.getvalue())
+        assert [r["id"] for r in rows] == [24, 20, 21, 22, 23, 25]  # por inicio; sin fechas al final
+        assert rows[2] == {"id": 21, "asunto": "Tarea 21", "inicio": "2026-10-17", "fin": "2026-10-20",
+                           "dias": 3, "despues de": "#20 +1"}
+        assert rows[3]["despues de"] == "#21" and rows[1]["despues de"] == ""
+
+    # Una sucesora con programacion automatica la corre GesPro; la que viene despues de ella, si es manual, no.
+    auto = task(21, "2026-10-17", "2026-10-20", scheduleManually=False)
+    writes = []
+    with fake_api({**pages, "/api/v3/work_packages/21": auto}, writes), contextlib.redirect_stdout(io.StringIO()):
+        move_task("demo", 20, 2, cascade=True)
+    assert [dates(w)[0] for w in writes] == ["20", "22"]
+
+    # Un 403 o 422 a mitad de la cascada dice que tareas ya quedaron movidas.
+    def refuse(method, payload):
+        if (payload or {}).get("startDate") == "2026-10-19":
+            raise RuntimeError("PATCH /api/v3/work_packages/21 -> HTTP 403: sin permiso")
+        if (payload or {}).get("lag") == 9:
+            raise RuntimeError("POST /api/v3/relations -> HTTP 422: ciclo")
+        return {}
+    writes = []
+    with fake_api(pages, writes, refuse), contextlib.redirect_stdout(io.StringIO()):
+        message = error_of(move_task, "demo", 20, 2, True)
+        assert "HTTP 403" in message and "Ya movi #20." in message and [dates(w)[0] for w in writes] == ["20", "21"]
+        assert "HTTP 422" in error_of(relate, "demo", 20, 22, "precede", 9)
+
+
 def self_check():
     assert iso_duration(360) == "PT6H" and iso_duration(15) == "PT15M" and iso_duration(137) == "PT2H17M"
     assert hours_from_iso("PT2H30M") == 2.5 and hours_from_iso("PT45M") == 0.75 and hours_from_iso(None) == 0
@@ -1923,6 +2182,7 @@ def self_check():
     check_story_points()
     check_more_commands()
     check_planning()
+    check_gantt()
     print("autotest: todo bien")
     return 0
 
@@ -1953,6 +2213,11 @@ def main():
     group.add_argument("--cerrar-sprint", metavar="SPRINT", help='pasa sus tareas abiertas al sprint de --sprint')
     group.add_argument("--crear-desde", metavar="ARCHIVO.csv", help="crea una tarea por cada fila del CSV")
     group.add_argument("--relacionar", type=int, metavar="ID", help="relaciona la tarea con la de --con")
+    group.add_argument("--desrelacionar", type=int, metavar="ID", help="borra la relacion con la tarea de --con")
+    group.add_argument("--mover", type=int, metavar="ID", help="corre inicio y fin de la tarea los dias de --dias")
+    group.add_argument("--manual", type=int, metavar="ID", help="programacion manual: GesPro no mueve la tarea solo")
+    group.add_argument("--automatica", type=int, metavar="ID", help="programacion automatica: sigue a sus predecesoras")
+    group.add_argument("--gantt", action="store_true", help="fechas, duracion y dependencias (filtra con --sprint o --padre)")
     group.add_argument("--adjuntar", nargs=2, metavar=("ID", "ARCHIVO"), help="sube un archivo a la tarea")
     group.add_argument("--iniciar", type=int, metavar="ID", help="empieza a contar el tiempo en esa tarea")
     group.add_argument("--parar", action="store_true", help="registra el tiempo desde --iniciar")
@@ -1979,8 +2244,12 @@ def main():
     parser.add_argument("--con", type=int, metavar="ID", help="con --relacionar: la otra tarea")
     parser.add_argument("--como", choices=list(RELATIONS), default="relacionada",
                         help="con --relacionar: tipo de relacion (por defecto, relacionada)")
+    parser.add_argument("--retraso", type=lag_arg, metavar="DIAS",
+                        help="con --relacionar y --como precede o sigue: dias entre una tarea y la otra")
+    parser.add_argument("--dias", type=int, metavar="N", help="con --mover: dias a correr la tarea (negativo, hacia atras)")
+    parser.add_argument("--cascada", action="store_true", help="con --mover: corre tambien las tareas que la siguen")
     parser.add_argument("--formato", choices=("json", "csv"),
-                        help="con --report, --mis-horas o --horas-equipo: salida en JSON o CSV")
+                        help="con --report, --mis-horas, --horas-equipo o --gantt: salida en JSON o CSV")
     parser.add_argument("--dry-run", action="store_true", help="muestra lo que haria sin escribir")
     args = parser.parse_args()
     # En Windows, lo que sale a un archivo o a otro programa iria en cp1252 y romperia las tildes.
@@ -1992,10 +2261,14 @@ def main():
             return self_check()
         if args.proyectos:
             return list_projects()
-        if args.formato and not (args.report or args.mis_horas or args.horas_equipo):
-            raise RuntimeError("--formato va con --report, --mis-horas o --horas-equipo.")
-        if args.con and args.relacionar is None:
-            raise RuntimeError("--con va con --relacionar.")
+        if args.formato and not (args.report or args.mis_horas or args.horas_equipo or args.gantt):
+            raise RuntimeError("--formato va con --report, --mis-horas, --horas-equipo o --gantt.")
+        if args.con and args.relacionar is None and args.desrelacionar is None:
+            raise RuntimeError("--con va con --relacionar o --desrelacionar.")
+        if args.retraso is not None and args.relacionar is None:
+            raise RuntimeError("--retraso va con --relacionar.")
+        if (args.dias is not None or args.cascada) and args.mover is None:
+            raise RuntimeError("--dias y --cascada van con --mover.")
         wanted = args.proyecto or read_setting("GESPRO_PROJECT")
         if args.mis_tareas:
             return my_tasks(wanted)
@@ -2022,7 +2295,19 @@ def main():
         if args.relacionar is not None:
             if not args.con:
                 raise RuntimeError("Dime con que tarea relacionarla: --con ID.")
-            return relate(wanted, args.relacionar, args.con, args.como, args.dry_run)
+            return relate(wanted, args.relacionar, args.con, args.como, lag=args.retraso, dry_run=args.dry_run)
+        if args.desrelacionar is not None:
+            if not args.con:
+                raise RuntimeError("Dime de que tarea separarla: --con ID.")
+            return unrelate(wanted, args.desrelacionar, args.con, args.dry_run)
+        if args.mover is not None:
+            if args.dias is None:
+                raise RuntimeError("Dime cuantos dias: --dias N (negativo para adelantarla).")
+            return move_task(wanted, args.mover, args.dias, args.cascada, args.dry_run)
+        if args.manual is not None or args.automatica is not None:
+            return set_scheduling(wanted, args.manual or args.automatica, args.manual is not None, args.dry_run)
+        if args.gantt:
+            return gantt(wanted, args.sprint, args.padre, args.formato)
         if args.adjuntar:
             task_id, path = args.adjuntar
             if not task_id.isdigit():

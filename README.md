@@ -222,7 +222,7 @@ Ninguno escribe nada.
   salen en esa lista.
 
 Para pegar esos datos en una planilla o un informe, agrega `--formato csv` o `--formato json` a
-`--report`, `--mis-horas` o `--horas-equipo`:
+`--report`, `--mis-horas`, `--horas-equipo` o `--gantt`:
 
 ```
 python gespro.py --horas-equipo --desde 2026-09-28 --formato csv > horas.csv
@@ -314,6 +314,39 @@ python gespro.py --adjuntar 620 captura-login.png
 
 `--adjuntar` sube un archivo a la tarea: la captura de una prueba, el PDF de un informe o el acta de
 una reunión. Recibe primero el número de la tarea y después la ruta del archivo.
+
+### El Gantt
+
+```
+python gespro.py --gantt --sprint "Sprint 3"
+python gespro.py --relacionar 620 --con 621 --como precede --retraso 2
+python gespro.py --mover 620 --dias 3 --cascada
+python gespro.py --mover 620 --dias -2
+python gespro.py --manual 621
+python gespro.py --desrelacionar 620 --con 621
+```
+
+`--gantt` lista las tareas con su inicio, su fin, cuántos días hábiles duran y de cuáles dependen.
+`despues de #620 +2` quiere decir que la tarea empieza dos días hábiles después de que termina la
+#620. Sin filtro muestra todo el proyecto. Con `--sprint` muestra un sprint y con `--padre`, lo que
+está dentro de una historia. También acepta `--formato csv` o `--formato json`.
+
+`--retraso` va con `--como precede` o `--como sigue` y fija cuántos días deja GesPro entre las dos
+tareas.
+
+`--mover` corre la tarea los días que digas en `--dias`. Con un número negativo, la adelanta. Cambia
+el inicio y deja la duración igual, así que GesPro calcula el fin saltándose los fines de semana,
+como cuando arrastras la barra en el Gantt. Con `--cascada` corre también las tareas que vienen
+después, siguiendo las relaciones `precede` hasta el final de la cadena. Si una de esas tareas tiene
+programación automática, la mueve GesPro y el script no la toca. El script corre las que están en
+manual. Antes de escribir lee la cadena completa, y si alguna tarea es de otro proyecto no mueve
+ninguna. Si GesPro rechaza una a mitad de camino, el error dice cuáles alcanzó a mover.
+
+`--manual` y `--automatica` cambian la programación de la tarea. Una tarea automática empieza cuando
+terminan sus predecesoras y se mueve con ellas. Una manual se queda en sus fechas aunque cambien las
+demás.
+
+`--desrelacionar` borra la relación entre dos tareas, sin importar de cuál a cuál se creó.
 
 ### Cronómetro
 
