@@ -2,6 +2,15 @@
 
 Los cambios de cada versión, del más nuevo al más antiguo.
 
+## 1.10.0, 14 de octubre de 2026
+
+### Agregado
+
+- `gespro_mcp.py`: servidor MCP con diez herramientas (ver y buscar tareas, sprint actual, horas,
+  revisión del proyecto, daily, actualizar y crear tareas). Corre `gespro.py` por dentro, con el mismo
+  token y las mismas validaciones. Necesita Python 3.10 y el paquete `mcp`; `gespro.py` sigue sin
+  dependencias. La forma de registrarlo está en el README.
+
 ## 1.8.1, 13 de octubre de 2026
 
 ### Corregido

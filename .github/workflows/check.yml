@@ -21,3 +21,4 @@ jobs:
           python-version: ${{ matrix.python }}
       # El autotest no usa la red ni el token: corre con respuestas fijas.
       - run: python gespro.py --check
+      - run: python gespro_mcp.py --check

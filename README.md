@@ -367,6 +367,50 @@ más de 24 horas, lo borra sin registrar nada, porque seguramente se te olvidó 
 anota lo que trabajaste de verdad con `--wp`. `--parar --dry-run` muestra cuánto registraría y deja el
 cronómetro corriendo.
 
+### Desde un asistente (MCP)
+
+`gespro_mcp.py` deja los comandos más usados como herramientas MCP, para pedirle a un asistente
+(Claude Code, Claude Desktop, Cursor, VS Code) cosas como «pasa la #620 a Done y anota 2 horas». Por
+dentro corre `gespro.py`, así que usa el mismo `gespro.env` y valida igual.
+
+Necesita Python 3.10 o superior y el paquete `mcp`:
+
+```bash
+pip install mcp
+```
+
+En Claude Code se registra con la ruta completa al archivo:
+
+```bash
+claude mcp add gespro -- python /ruta/a/gespro_mcp.py
+```
+
+En los demás clientes va en su archivo de configuración de MCP (en Claude Desktop,
+`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "gespro": {"command": "python", "args": ["/ruta/a/gespro_mcp.py"]}
+  }
+}
+```
+
+| Herramienta | Equivale a |
+|---|---|
+| `mis_tareas` | `--mis-tareas` |
+| `ver_tarea` | `--ver ID` |
+| `buscar_tareas` | `--buscar TEXTO` |
+| `sprint_actual` | `--sprint-actual` |
+| `mis_horas`, `horas_equipo` | `--mis-horas`, `--horas-equipo` (con `desde` opcional) |
+| `revisar_proyecto` | `--revisar` y `--atrasadas` |
+| `daily` | `--daily` |
+| `actualizar_tarea` | `--wp ID` con estado, progreso, horas, comentario, sprint, fechas... |
+| `crear_tarea` | `--crear ASUNTO` |
+
+`actualizar_tarea` y `crear_tarea` aceptan `dry_run`. Pídele al asistente que lo use antes de
+escribir. El resto de los comandos (Gantt, puntos, CSV, cronómetro) sigue en la terminal.
+
 ## 3. Buenas prácticas
 
 - Registra las horas que trabajaste de verdad, el día que las trabajaste. GesPro es la evidencia de
