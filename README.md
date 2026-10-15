@@ -277,6 +277,26 @@ Pasa al sprint de `--sprint` todas las tareas que siguen abiertas en el sprint q
 cerradas se quedan donde están. Si una tarea falla, por ejemplo porque alguien la estaba editando,
 sigue con las demás y te dice cuál quedó atrás.
 
+### Llenar los campos de las tareas
+
+```
+cd ruta/al/repo/del/proyecto
+python ruta/a/gespro.py --llenar-campos --campo "Campus=Santiago" --campo "Course=CINF100" --dry-run
+python ruta/a/gespro.py --llenar-campos --campo "Campus=Santiago" --campo "Course=CINF100"
+```
+
+Recorre todas las tareas del proyecto y llena los campos personalizados del apartado «Otros». El
+campo `Sprint` toma el nombre de la versión de la tarea. `Repository URL` toma el remoto `origin`
+del repo donde lo ejecutas, si es de GitHub. `Pull Request URL` toma el PR más reciente que nombra
+la tarea con `OP#N` o que sale de una rama `task/N-...`. Los PR cerrados sin integrar no cuentan.
+Para leer los PR necesita [gh](https://cli.github.com/) con la sesión iniciada; sin `gh`, avisa y
+llena lo demás.
+
+Cada `--campo NOMBRE=VALOR` pone ese valor en todas las tareas. En un campo de lista, como Campus o
+Course, el valor tiene que ser una de sus opciones, sin importar tildes ni mayúsculas. Si no lo es,
+el error muestra las opciones. Solo escribe en las tareas a las que les falta algo, así que puedes
+volver a ejecutarlo cada vez que se abra un PR.
+
 ### Crear varias tareas desde un CSV
 
 ```
