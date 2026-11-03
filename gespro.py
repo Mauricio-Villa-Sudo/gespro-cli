@@ -2006,7 +2006,9 @@ def check_team_views():
     pages = {
         "/api/v3/projects/demo": {"id": 7},
         "/api/v3/users/me": {"_links": {"self": {"href": "/api/v3/users/1"}}},
-        "/api/v3/projects/7/versions": {"_embedded": {"elements": sprints}},
+        # sprint_status reads today's date, so the current sprint must not end before the check runs.
+        "/api/v3/projects/7/versions": {"_embedded": {"elements": [*sprints[:2], {**sprints[2], "endDate": "2099-12-31"},
+                                                                   sprints[3]]}},
         "/api/v3/statuses": {"_embedded": {"elements": [{"isClosed": True, "_links": {"self": {"href": "/api/v3/statuses/7"}}}]}},
         # El sprint en curso pide todos los estados ("*"); lo de sprints anteriores, solo las abiertas.
         "/api/v3/projects/7/work_packages": lambda query: {"_embedded": {"elements": (
